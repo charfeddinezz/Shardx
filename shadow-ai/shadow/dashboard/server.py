@@ -22,11 +22,26 @@ from ..util import jdump
 
 
 class Dashboard:
+    """Local window onto a running system.
+
+    Loopback by default. A non-loopback bind is allowed (a container, a phone
+    on the same network) but then every write needs the token: a dashboard
+    that can type a password and approve a payment must not be open to the
+    whole LAN just because someone passed `--host 0.0.0.0`.
+    """
+
     def __init__(self, cfg: ShadowConfig, host: str = "127.0.0.1", port: int = 40330,
-                 brain: Optional[ShadowAI] = None):
+                 brain: Optional[ShadowAI] = None, token: str = ""):
         self.cfg = cfg
         self.host = host
         self.port = port
+        self.token = token
+        self.read_token = ""
+        # Fail at construction, not on the first request: a misconfigured bind
+        # should be a startup error someone sees, not a silent exposure.
+        if host not in ("127.0.0.1", "localhost", "::1") and not token:
+            raise ValueError("refusing to serve a write-capable dashboard on "
+                             f"{host} without a token: pass --token or bind 127.0.0.1")
         self.brain = brain or ShadowAI(cfg, printer=lambda line: None)
         self.httpd: Optional[ThreadingHTTPServer] = None
         self._worker: Optional[threading.Thread] = None
@@ -36,6 +51,8 @@ class Dashboard:
     # -- lifecycle ----------------------------------------------------
     def start(self) -> "Dashboard":
         self.brain.boot()
+        loopback = self.host in ("127.0.0.1", "localhost", "::1")
+        self.read_token = "" if loopback else self.token
         dashboard = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -53,6 +70,15 @@ class Dashboard:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _authorized(self) -> bool:
+                if not dashboard.token or dashboard.host in ("127.0.0.1", "localhost", "::1"):
+                    return True
+                header = self.headers.get("X-Shadow-Token", "")
+                if header == dashboard.token:
+                    return True
+                self._json({"error": "this dashboard needs X-Shadow-Token"}, 401)
+                return False
+
             def _html(self, text: str) -> None:
                 body = text.encode("utf-8")
                 self.send_response(200)
@@ -64,7 +90,8 @@ class Dashboard:
             def do_GET(self):
                 path = urlparse(self.path)
                 if path.path in ("/", "/index.html"):
-                    return self._html(PAGE)
+                    page = PAGE.replace("__SHADOW_TOKEN__", json.dumps(dashboard.read_token))
+                    return self._html(page)
                 if path.path == "/api/state":
                     return self._json(dashboard.state())
                 if path.path == "/api/journal":
@@ -76,6 +103,8 @@ class Dashboard:
                 return self._json({"error": "not found"}, 404)
 
             def do_POST(self):
+                if not self._authorized():
+                    return
                 path = urlparse(self.path)
                 length = int(self.headers.get("Content-Length") or 0)
                 try:
@@ -214,6 +243,9 @@ PAGE = r"""<!doctype html>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const TOKEN = __SHADOW_TOKEN__;
+const authHeaders = Object.assign({"Content-Type":"application/json"},
+                                  TOKEN ? {"X-Shadow-Token": TOKEN} : {});
 let lastTask = null;
 
 async function refresh() {
@@ -265,7 +297,7 @@ function showResult(r) {
     const b = document.createElement("button");
     b.textContent = "Approve and continue";
     b.onclick = async () => {
-      await fetch("api/approve", {method:"POST", headers:{"Content-Type":"application/json"},
+      await fetch("api/approve", {method:"POST", headers: authHeaders,
                                   body: JSON.stringify({task_id: r.task_id})});
       refresh();
     };
@@ -278,7 +310,7 @@ $("f").onsubmit = async (e) => {
   const goal = $("goal").value.trim();
   if (!goal) return;
   $("result").textContent = "starting…";
-  const r = await fetch("api/run", {method:"POST", headers:{"Content-Type":"application/json"},
+  const r = await fetch("api/run", {method:"POST", headers: authHeaders,
                                     body: JSON.stringify({goal})});
   if (!r.ok) { const e = await r.json(); $("result").innerHTML = `<span class="err">${esc(e.error)}</span>`; }
   else { setTimeout(refresh, 300); }

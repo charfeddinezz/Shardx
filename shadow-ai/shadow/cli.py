@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -58,8 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--goal", default="")
 
     serve = sub.add_parser("serve", help="local dashboard")
-    serve.add_argument("--host", default="0.0.0.0",
-                       help="0.0.0.0 lets a container or a phone on the LAN reach it")
+    serve.add_argument("--host", default="127.0.0.1",
+                       help="0.0.0.0 reaches a container or a phone on the LAN; then --token is required")
+    serve.add_argument("--token", dest="dash_token", default="",
+                       help="required when --host is not loopback; sent as X-Shadow-Token")
     serve.add_argument("--port", type=int, default=40330)
     serve.add_argument("--open", action="store_true")
 
@@ -291,7 +294,12 @@ def _demo(brain: ShadowAI, args) -> int:
 def _serve(args, overrides: Dict[str, Any]) -> int:
     from .dashboard.server import Dashboard
     cfg = ShadowConfig.load(path=args.config or None, overrides=overrides)
-    dash = Dashboard(cfg, host=args.host, port=args.port)
+    token = getattr(args, "dash_token", "") or args.token
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not token:
+        token = secrets.token_urlsafe(18)
+        print(f"this dashboard is reachable beyond this computer; token: {token}")
+        print("open it with:  --token " + token + "   (or send X-Shadow-Token)")
+    dash = Dashboard(cfg, host=args.host, port=args.port, token=token)
     dash.start()
     url = f"http://{args.host}:{dash.port}/"
     print(f"SHADOW dashboard: {url}")

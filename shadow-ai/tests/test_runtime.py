@@ -317,6 +317,51 @@ class DashboardTest(BrainCase):
         self.assertEqual(caught.exception.code, 400)
 
 
+class DashboardAuthTest(BrainCase):
+    """The dashboard can type a password and approve a payment. It must not be
+    reachable by anything that did not ask for it."""
+
+    def test_a_public_bind_without_a_token_is_refused_at_startup(self):
+        from shadow.dashboard.server import Dashboard
+        cfg = self.config()
+        brain = ShadowAI(cfg, printer=lambda line: None)
+        brain.ctx._mock = self.mock
+        self.addCleanup(brain.shutdown)
+        with self.assertRaises(ValueError):
+            Dashboard(cfg, host="0.0.0.0", port=0, brain=brain)
+
+    def test_a_public_bind_needs_the_token_for_writes(self):
+        from shadow.dashboard.server import Dashboard
+        cfg = self.config()
+        brain = ShadowAI(cfg, printer=lambda line: None)
+        brain.ctx._mock = self.mock
+        dash = Dashboard(cfg, host="0.0.0.0", port=0, brain=brain, token="lan-token").start()
+        self.addCleanup(dash.stop)
+        base = f"http://127.0.0.1:{dash.port}"
+        body = json.dumps({"goal": "Open http://shop.local/ and read the title"}).encode()
+        bare = urllib.request.Request(base + "/api/run", data=body,
+                                      headers={"Content-Type": "application/json"}, method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(bare, timeout=10)
+        self.assertEqual(caught.exception.code, 401)
+        signed = urllib.request.Request(base + "/api/run", data=body,
+                                        headers={"Content-Type": "application/json",
+                                                 "X-Shadow-Token": "lan-token"}, method="POST")
+        self.assertEqual(urllib.request.urlopen(signed, timeout=10).status, 200)
+
+    def test_loopback_needs_no_token(self):
+        from shadow.dashboard.server import Dashboard
+        cfg = self.config()
+        brain = ShadowAI(cfg, printer=lambda line: None)
+        brain.ctx._mock = self.mock
+        dash = Dashboard(cfg, host="127.0.0.1", port=0, brain=brain).start()
+        self.addCleanup(dash.stop)
+        body = json.dumps({"goal": "Open http://shop.local/ and read the title"}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{dash.port}/api/run", data=body,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        self.assertEqual(urllib.request.urlopen(req, timeout=10).status, 200)
+
+
 class CliTest(BrainCase):
     def run_cli(self, *argv):
         from shadow.cli import main
