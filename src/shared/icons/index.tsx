@@ -102,6 +102,9 @@ import {
   CloudOffIcon,
   CloudAlertIcon,
   Layout01Icon,
+  ChatBotIcon,
+  SendHorizontalIcon,
+  EraserIcon,
 } from "@hugeicons/core-free-icons";
 import type { ComponentProps } from "react";
 
@@ -299,6 +302,14 @@ export const FOLDER_ICON_GLYPHS = {
   rocket: make(Rocket01Icon),
 };
 
+
+/* ── The assistant dock ── */
+/** The assistant's toggle and title. */
+export const AssistantIcon = make(ChatBotIcon, "assistant");
+/** Sends a line in the dock's input. */
+export const SendIcon = make(SendHorizontalIcon, "send");
+/** Clears the dock's conversation. */
+export const ClearIcon = make(EraserIcon, "clear");
 
 /** A step's glyph (see blockIcon in the automation entity): 14 px, decoration only. */
 export function StepIcon({ icon, ...rest }: IconProps & { icon: HugeiconsIconProps["icon"] }) {

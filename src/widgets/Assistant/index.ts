@@ -1,0 +1,1 @@
+export { AssistantHost } from "./AssistantDock";

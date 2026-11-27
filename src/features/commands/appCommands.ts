@@ -4,7 +4,7 @@ import { siteUrl } from "../../shared/lib/utils";
 import {
   ComputerIcon, FolderAddIconApp, GlobeIcon, HelpCircleIcon, KeyboardIcon, MoonIcon, NavAutomationIcon, NavBookmarksIcon, NavBrowsersIcon,
   NavExtensionsIcon, NavFingerprintsIcon, NavPatchLogIcon, NavSettingsIcon, NavShopIcon, NavTrashIcon,
-  RouteIcon, SpaceTeamIcon, StopIcon, SunIcon, AddIcon, SyncedIcon,
+  RouteIcon, SpaceTeamIcon, StopIcon, SunIcon, AddIcon, SyncedIcon, AssistantIcon,
 } from "../../shared/icons";
 import type { Section } from "../../shared/types";
 import { useNav, type SettingsTab } from "../../shared/model/navigation";
@@ -17,6 +17,7 @@ import { dropPref } from "../../pages/settings/useSettingsDraft";
 import { focusPageFilter, hasPageFilter } from "../../shared/lib/pageFilter";
 import { cycleRegion } from "../../shared/lib/regions";
 import { defineCommands, type Command } from "../../shared/commands";
+import { useAssistant } from "../../entities/assistant";
 import { leaveList, useProfile, useProfileUi } from "../../entities/profile";
 import { leaveEditor, useAutomation } from "../../entities/automation";
 import { toast } from "../../shared/model/toast";
@@ -96,6 +97,16 @@ export const APP_COMMANDS: readonly Command[] = [
     keywords: () => ["keys", "help", "?"],
     surfaces: ["palette", "sheet"],
     run: () => useShortcutSheet.getState().setOpen(true),
+  },
+  {
+    // The local assistant: its dock answers about profiles and proxies and
+    // runs what it offers, one card at a time (the built-in brain offline,
+    // a local model when the dock's settings turn one on).
+    ...APP, id: "app.assistant", group: "help", icon: AssistantIcon,
+    label: () => t("commands.askAssistant"), keys: ["Mod+J"], keyWhere: "app", inFields: true,
+    keywords: () => ["assistant", "chat", "bot", "ask", "ai"],
+    surfaces: ["palette", "sheet"],
+    run: () => useAssistant.getState().toggle(),
   },
   {
     ...APP, id: "app.filter", scope: "page", group: "view",

@@ -68,6 +68,10 @@ export default defineConfig(async () => {
       // health-check hangs forever at "Waiting for your frontend dev server to
       // start"). Must match devUrl in tauri.conf.json.
       host: host || "127.0.0.1",
+      // An exposed dev server (TAURI_DEV_HOST set, e.g. behind a tunnel or a
+      // preview proxy) serves whoever reaches it; loopback keeps Vite's own
+      // host check (DNS rebinding) as it is.
+      allowedHosts: host ? true : undefined,
       hmr: host
         ? {
             protocol: "ws",

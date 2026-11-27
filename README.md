@@ -266,6 +266,16 @@ iframes, web workers, developer tools and headless mode.
 * **Camera:** a profile can present a video file, a still image or a region
   of the screen as its webcam, with the device named the way the claimed
   machine would name it.
+* **Local assistant:** a chat dock in the corner of the workspace (Mod+J)
+  that works on this computer and answers offline. It starts and stops
+  profiles by name — typos included — reports proxy health, counts the
+  workspace, opens pages and answers questions about the app from a local
+  knowledge base (TF-IDF retrieval). Every answer comes with cards that run
+  the action when pressed, and a turn remembers the rows and the verb of the
+  one before, so "stop them" after "start sandbox" knows what it means. A
+  local model (Ollama or any OpenAI-compatible server) can answer first when
+  one is turned on in the dock's settings, with the built-in brain as the
+  fallback. See [docs/assistant.md](docs/assistant.md).
 * **Local automation API:** axum HTTP server on `127.0.0.1`,
   Bearer JWT authentication. Full reference at
   [docs.shardx.com/eng/shardx-launcher-api](https://docs.shardx.com/eng/shardx-launcher-api/binding-and-lifecycle?fallback=true&utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher),
