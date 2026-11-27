@@ -188,6 +188,19 @@ class MockDocument:
             return out
         return {"error": f"unknown probe {name}"}
 
+    def label_for(self, node: Node) -> str:
+        """The text a person reads as this field's label: <label for>, a
+        wrapping <label>, or aria-labelledby. Real DOM readers get this free;
+        the mock has to look it up, and a field without it is undiscoverable."""
+        if node.id:
+            for other in self.nodes:
+                if other.tag == "label" and other.get("for") == node.id:
+                    return other.inner_text().strip()
+        for parent in node.ancestors():
+            if parent.tag == "label":
+                return parent.inner_text().replace(node.inner_text(), "").strip()
+        return ""
+
     def describe(self, node: Node, active: bool = False) -> Dict[str, Any]:
         rect = self.rect(node)
         key = _key(node)
@@ -202,6 +215,7 @@ class MockDocument:
             "interactive": node.tag in INTERACTIVE or node.get("onclick") != "",
             "role": node.get("role") or _role(node),
             "name": _accessible_name(node),
+            "label": self.label_for(node) if node.tag in ("input", "select", "textarea") else "",
             "value": self.values.get(key, node.get("value", "")),
             "checked": node.get("checked", "") != "",
             "disabled": ("disabled" in node.attrs) or node.get("aria-disabled") == "true",

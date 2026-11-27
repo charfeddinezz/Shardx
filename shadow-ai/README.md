@@ -97,6 +97,10 @@ supervisor restart one without touching the others.
 | 🛡️ **Safety** | `engines/safety.py` | URL and action policy, approvals, budgets — the last gate |
 | 🧭 **Decision** | `engines/decision.py` | Chooses the next action from plan, model, or page; validates model output |
 | 🧩 **Browser** | `engines/browser.py` | Profile lifecycle and the CDP attachment the rest share |
+| 🪟 **Page Events** | `engines/pages.py` | New tabs, popups and JavaScript dialogs — the three things that stop a run dead |
+| 🎬 **Actions** | `engines/actions.py` | Every verb in one place, so a plan, a model and the CLI behave identically |
+| 🔁 **Reasoning** | `engines/react.py` | The loop: look, decide, act, look again — plan first, model when the plan is spent |
+| 🚀 **Fleet** | `engines/fleet.py` | Several profiles at once, one worker each, bounded parallelism |
 | **Autonomous Supervisor** | `engines/supervisor.py` | Heartbeat, restart, quarantine, resume — the next development, built |
 
 ---
@@ -136,6 +140,55 @@ something nearby.
 
 ---
 
+### The reasoning loop, and when it runs
+
+A goal whose plan contains a change to the page — open, find, click, fill,
+login, submit, buy, scroll, select, press — goes through the loop, not through
+the plan once and done. Read-only goals stay plan-driven and cheap.
+
+Every turn: look at the page, pick one action, carry it out, look again. The
+decision order is fixed and deliberate:
+
+1. **The reviewed plan**, if it still has an unused step. `shadow plan` is a
+   contract, and the loop does not quietly ignore it.
+2. **The local model**, only when the plan is spent or a step just failed.
+3. **The page itself**, as a last resort — and it may not repeat an action
+   already performed against the same page.
+
+The result carries the whole reasoning trail:
+
+```bash
+shadow --json run "Open http://shop.local/ and click Contact" | jq '.results.thoughts'
+```
+
+Three things stop a loop rather than letting it spin: `stale_after` turns
+without the page changing, three failed actions in a row, and `max_turns`.
+The status says which: `stuck` (the page never moved) or `failed` with the
+last real error.
+
+### Page events: popups and dialogs
+
+Two page behaviours break naive automation, so they are handled in the page
+session rather than left to luck:
+
+* **A new tab or window** (OAuth, a receipt, a payment page). A click is
+  bracketed: snapshot the tab list, click, then attribute. `tabs_policy`
+  decides what happens — `switch` (default) follows the popup and keeps
+  working there, `ignore` leaves the session where it was, `close` shuts the
+  popup. `switch_tab` returns to `main` afterwards.
+* **A JavaScript dialog.** While one is open, every `Runtime.evaluate` blocks
+  forever. Dialogs are subscribed to, plain `alert`s are dismissed, and a
+  `confirm`/`prompt` is recorded and either answered by the run or left for a
+  person. The mock reproduces the block exactly, which is how the fix is
+  tested rather than hoped for.
+
+```bash
+shadow run "Open http://dialog.local/ and click the Rename account button"
+shadow run "Open http://popup.local/ and click Continue with Example"
+```
+
+---
+
 ## 4. The supervisor
 
 Four jobs, one thread, every 5 seconds by default:
@@ -170,15 +223,48 @@ print(brain.engine("supervisor").report())
 | `shadow ask "<question>" [--url U]` | Answer from the current page (or `U`) |
 | `shadow status` | Profile, engines, supervisor, recent tasks |
 | `shadow engines` | Health table, one line per engine |
+| `shadow fleet "<goal>" [--profiles a,b]` | The same goal on several profiles, in parallel |
 | `shadow doctor` | Python, token, launcher, Motion, OCR, local model |
+| `shadow doctor --live` | The above **and** a real profile, page and goal, end to end |
 | `shadow demo` | The scripted mock run |
 | `shadow memory` | What SHADOW remembers |
 | `shadow approve <task>` | Continue a task that stopped for approval |
 | `shadow serve [--port 40330]` | Local dashboard |
 
 Global flags: `--mock`, `--json`, `--quiet`, `--profile`, `--state`,
-`--token`, `--launcher-settings`, `--config`. They work before or after the
-verb.
+`--token`, `--launcher-settings`, `--api-base`, `--config`. They work before
+or after the verb.
+
+### The fleet
+
+One goal, several browsers, one worker each — each with its own engines,
+journal, state directory and CDP session, so nothing is shared but the pool
+that starts them:
+
+```bash
+shadow fleet "Open http://shop.local/ and read the title" --profiles a,b,c
+shadow fleet --json "Open shop.local and read the title" --all-profiles
+```
+
+`fleet.max_parallel` (default 3) bounds the pool. Each worker seeds its own
+motion, so two identical goals do not produce two identical pointers. A
+worker that throws fails alone; the rest finish. A protected host is refused
+*before* any worker starts. The dashboard has the same thing at `/api/fleet`
+and a **Fan out** box.
+
+### Proving it on the machine it will run on
+
+`doctor` alone proves the token parses and `/health` answers. That is not the
+same as "SHADOW can drive this box", so:
+
+```bash
+shadow doctor --live --live-url https://example.com/
+```
+
+It lists your real profiles, starts one through `POST /profiles/{id}/start`,
+attaches to the returned CDP endpoint, loads a page and runs one goal. Every
+line after `Motion domain` is something that actually happened. Exit code 1
+means it did not.
 
 Exit codes: `0` done, `1` failed, `3` waiting for approval.
 
@@ -195,6 +281,8 @@ These are not suggestions; they are the values a fresh install starts with.
 | `allowed_commands` | `echo date hostname` | The only programs allowed when enabled |
 | `blocked_hosts` | localhost, `127.0.0.1`, `::1`, `169.254.169.254`, … | Never touched, whatever the goal says |
 | `redact_sensitive_inputs` | **true** | Passwords and card numbers never reach the journal or memory |
+| `redact_values` | **true** | Values *typed into* secret fields are scrubbed by value from every journal line, memory file and dashboard payload |
+| `protected_hosts` | bank, paypal, stripe, wise, revolut, gov, tax, cashplus, westernunion … | A matching host stops the run as `needs_approval` **before a browser is even started** |
 | `max_task_seconds` / `max_steps_per_task` | 900 / 500 | A run that never ends is stopped |
 | Payment / destructive clicks | ask a person | `needs_approval`, then `shadow approve` |
 
@@ -255,7 +343,7 @@ with ShadowAI(cfg) as brain:
 ## 9. Tests
 
 ```bash
-python run_tests.py -v      # 113 tests, no browser, no network
+python run_tests.py -v      # 186 tests, no browser, no network
 ```
 
 The suite runs the whole system against the mock engine: the WebSocket framing,
@@ -285,6 +373,20 @@ Said plainly, because the difference matters:
 * **The local model is optional and off by default.** With no model, the
   planner is deterministic and narrower — very good at forms, search, reading
   and navigation, not at improvising on arbitrary layouts.
+* **The live path is tested against a launcher-shaped fake, not Chrome.** The
+  fake mirrors this repository's `src-tauri/src/api.rs` and `openapi.yaml`
+  route for route, and behind it is a real CDP server — but the last step
+  (a real ShardBrowser engine on a real desktop) still has to be `shadow
+  doctor --live` on your machine.
+* **No CAPTCHA and no 2FA path.** A login that asks for a one-time code stops
+  and says so; it does not try to look human at a challenge.
+* **No per-site skill library.** Lessons are remembered per URL, but there is
+  no curated selector pack per site — a heavily customised page may need one
+  editing session.
+* **`shadow init` does not exist.** Configuration is `shadow.json` (or
+  `shadow.json.example`, which lists every key) plus `--token`.
+* **The scheduler does not persist.** Jobs live as long as the process;
+  `journal.compact()` is implemented but never scheduled.
 
 ---
 
@@ -318,7 +420,7 @@ shadow-ai/
 │   ├── runtime/orchestrator.py the only place that knows the whole cast
 │   ├── mock/                   launcher · CDP engine · DOM · pages
 │   └── dashboard/              one HTML page and a small JSON API
-├── tests/                      113 tests
+├── tests/                      186 tests (incl. fake launcher + fake model)
 └── docs/                       architecture · writing an engine
 ```
 

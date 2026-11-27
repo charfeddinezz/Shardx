@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--state", default="", help="state directory (journal, memory, data)")
     p.add_argument("--token", default="", help="bearer token from Settings > Automation API")
     p.add_argument("--launcher-settings", default="", help="path to the launcher's settings.json")
+    p.add_argument("--api-base", default="", help="the launcher's automation API (default 127.0.0.1:40325)")
     p.add_argument("--quiet", action="store_true", help="print only results")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     sub = p.add_subparsers(dest="verb")
@@ -51,7 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--url", default="")
 
     sub.add_parser("status", help="engines, supervisor and journal")
-    sub.add_parser("doctor", help="check the environment")
+    doc = sub.add_parser("doctor", help="check the environment")
+    doc.add_argument("--live-url", default="http://example.com/",
+                     help="the page the live check loads (use a site you expect to reach)")
+    doc.add_argument("--live", action="store_true",
+                     help="also prove it: profiles list, a browser starts, a page loads, a goal runs")
     sub.add_parser("engines", help="engine health table")
     sub.add_parser("memory", help="what SHADOW remembers")
 
@@ -80,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 GLOBAL_FLAGS = {"--mock", "--json", "--quiet", "--profile", "--state", "--token",
-                "--launcher-settings", "--config"}
+                "--launcher-settings", "--config", "--api-base"}
 
 
 def _split_globals(argv: List[str]) -> List[str]:
@@ -114,6 +119,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         overrides["api_token"] = args.token
     if args.launcher_settings:
         overrides["launcher_settings"] = args.launcher_settings
+    if getattr(args, "api_base", ""):
+        overrides["api_base"] = args.api_base
 
     if args.verb == "serve":
         return _serve(args, overrides)
@@ -213,6 +220,62 @@ def _plan(cfg: ShadowConfig, goal: str, args) -> int:
         brain.shutdown()
 
 
+def _live_checks(cfg: ShadowConfig, checks: List[Dict[str, Any]], args) -> None:
+    """The checks that are only true if something actually happens.
+
+    `doctor` without --live proves the token parses and the launcher answers
+    /health. That is not the same as "SHADOW can drive this machine", so with
+    --live it lists real profiles, starts one, loads a real page and runs one
+    goal that needs no judgement.
+    """
+    from .engines.workflow import Step
+    from .transport.shardx import ShardxApi
+
+    if not cfg.mock and not any(c["check"] == "launcher" and c["ok"] for c in checks):
+        # one clear line beats five symptoms: nothing can be proven about a
+        # machine whose launcher is not answering
+        checks.append({"check": "live run", "ok": False,
+                       "detail": f"the launcher is not answering at {cfg.api_base} — "
+                                 "start ShardX, then run this again"})
+        return
+
+    brain = ShadowAI(cfg, printer=lambda line: None)
+    profiles: List[str] = []
+    try:
+        if cfg.mock:
+            profiles = brain.profiles()
+            checks.append({"check": "profiles", "ok": bool(profiles),
+                           "detail": f"mock: {', '.join(profiles)}"})
+        else:
+            api = ShardxApi(cfg.api_base, token=cfg.resolve_token())
+            raw = api.profiles()
+            profiles = [p.get("id", "") for p in raw if p.get("id")]
+            checks.append({"check": "profiles", "ok": bool(profiles),
+                           "detail": f"{len(profiles)} profile(s): {', '.join(profiles[:5]) or 'none'}"})
+    except Exception as exc:  # noqa: BLE001
+        checks.append({"check": "profiles", "ok": False, "detail": str(exc)[:200]})
+
+    target = (args.profile or "") or (profiles[0] if profiles else cfg.default_profile)
+    try:
+        brain.boot()
+        cdp = brain.ctx.ensure_cdp(target)
+        checks.append({"check": "attach", "ok": cdp is not None,
+                       "detail": f"{brain.ctx.profile_id} · motion={cdp.motion_available()}"})
+        loaded = brain.engine("actions").perform(
+            Step("goto", target=args.live_url), index=-1)
+        title = str((loaded or {}).get("title", ""))
+        checks.append({"check": "page load", "ok": bool(title),
+                       "detail": f"{args.live_url} → {title[:60]!r}"})
+        result = brain.run(f"Open {args.live_url} and read the title")
+        checks.append({"check": "goal", "ok": result.status == "done",
+                       "detail": f"{result.status} · answer={result.results.get('answer', '-')!r}"})
+    except Exception as exc:  # noqa: BLE001
+        checks.append({"check": "live run", "ok": False,
+                       "detail": f"{type(exc).__name__}: {exc}"[:200]})
+    finally:
+        brain.shutdown()
+
+
 def _doctor(cfg: ShadowConfig, args) -> int:
     checks: List[Dict[str, Any]] = []
     checks.append({"check": "python", "ok": sys.version_info >= (3, 8),
@@ -234,7 +297,14 @@ def _doctor(cfg: ShadowConfig, args) -> int:
         try:
             health = api.health()
             checks.append({"check": "launcher", "ok": True,
-                           "detail": f"{cfg.api_base} · {health.get('service', health.get('ok', 'ok'))}"})
+                           "detail": f"{cfg.api_base} · {health.get('name', 'launcher')} "
+                                     f"{health.get('version', '')}".strip()})
+            if not cfg.default_profile:
+                # nothing was chosen: use the first real profile rather than
+                # failing the browser check for the lack of a name
+                listed = api.profiles()
+                if listed and listed[0].get("id"):
+                    cfg.default_profile = listed[0]["id"]
         except Exception as exc:  # noqa: BLE001
             checks.append({"check": "launcher", "ok": False, "detail": f"{cfg.api_base}: {exc}"})
 
@@ -264,12 +334,18 @@ def _doctor(cfg: ShadowConfig, args) -> int:
     finally:
         brain.shutdown()
 
+    if getattr(args, "live", False):
+        _live_checks(cfg, checks, args)
+
     if args.json:
         print(jdump(checks, indent=2))
     else:
         for item in checks:
             print(f"{'ok  ' if item['ok'] else 'FAIL'}  {item['check']:<14} {item['detail']}")
-    return 0 if all(c["ok"] for c in checks if c["check"] not in ("tesseract", "local model")) else 1
+    # tesseract and a local model are genuinely optional; anything else that
+    # fails (including every --live check) means SHADOW cannot drive this box
+    optional = ("tesseract", "local model")
+    return 0 if all(c["ok"] for c in checks if c["check"] not in optional) else 1
 
 
 def _engines(brain: ShadowAI, args) -> int:

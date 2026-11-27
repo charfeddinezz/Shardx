@@ -18,6 +18,9 @@ from ..util import truncate
 from .base import Engine
 
 MAX_TEXT = 1200
+# One verb, several names. A planner says "buy"; the engine says "purchase".
+REVERB = {"buy": "approve", "checkout": "approve", "order": "approve",
+          "purchase": "approve", "pay": "approve"}
 READABLE = ("title", "page title", "heading", "url", "price", "prices", "total", "amount",
             "page", "text", "", "links", "fields", "table")
 
@@ -39,7 +42,10 @@ class ActionsEngine(Engine):
         """Return a small, JSON-safe description of what happened."""
         self.performed += 1
         self.note(action=step.action, target=step.target[:60])
-        handler = getattr(self, f"_do_{step.action}", None)
+        # Two names for one verb: a planner says "buy", the engine says
+        # "purchase", and both must hit the approval gate.
+        handler = getattr(self, f"_do_{step.action}", None) or \
+            getattr(self, f"_do_{REVERB.get(step.action, step.action)}", None)
         if handler is None:
             raise StepFailed(f"unknown step action {step.action!r}", step=index)
         return handler(step, task, index)
@@ -55,13 +61,13 @@ class ActionsEngine(Engine):
     def _do_back(self, step, task, index):
         cdp = self.ctx.ensure_cdp()
         cdp.evaluate("history.back()")
-        cdp.wait_ready()
+        cdp.wait_ready(timeout=15)
         return {"url": cdp.current_url()}
 
     def _do_forward(self, step, task, index):
         cdp = self.ctx.ensure_cdp()
         cdp.evaluate("history.forward()")
-        cdp.wait_ready()
+        cdp.wait_ready(timeout=15)
         return {"url": cdp.current_url()}
 
     def _do_reload(self, step, task, index):
@@ -206,13 +212,15 @@ class ActionsEngine(Engine):
         mouse.click_element(probe, field.node)
         # Native select popups are not DOM. Choosing by option text through the
         # page is what a person's keyboard does, and it is what stays reliable.
-        self.ctx.cdp.evaluate(
+        chosen = self.ctx.cdp.evaluate(
             "(() => { const el = document.querySelector(%r); if (!el) return false;"
             " for (const o of el.options) { if (o.text.trim().toLowerCase().includes(%r)) "
             "{ el.value = o.value; el.dispatchEvent(new Event('change', {bubbles:true})); return true; } }"
             " return false; })()" % (field.node.get("selector"), (step.value or "").lower()))
+        if chosen is False:
+            raise ElementNotFound(f"the {step.target!r} select has no option matching {step.value!r}")
         return {"selected": step.value, "field": field.node.get("selector"),
-                "options": len(data.list_items(probe, f"{field.node.get('selector')} option"))}
+                "options": probe.count(f"{field.node.get('selector')} option")}
 
     def _do_press(self, step, task, index):
         return self.engine("keyboard").press(step.target)
@@ -267,13 +275,20 @@ class ActionsEngine(Engine):
         return data.list_items(probe, step.target or "li")
 
     def _do_assert(self, step, task, index):
+        """`ok` is the key the workflow reads to fail a plan step; `assert` is
+        kept because that is what the journal has always called it."""
         probe = self.ctx.page()
         if step.target.startswith(("#", ".", "[")):
-            actual = probe.text(step.target)
+            actual = probe.text(step.target) or ""
             ok = bool(actual and (step.value in actual if step.value else actual))
-            return {"assert": ok, "actual": truncate(actual or "", 200)}
+            return {"ok": ok, "assert": ok, "actual": truncate(actual, 200)}
+        if step.value or not step.target:
+            # "assert the page says X": plain text anywhere on the page
+            text = probe.ask("text", "body") or ""
+            ok = bool(step.value) and step.value.lower() in str(text).lower()
+            return {"ok": ok, "assert": ok, "actual": truncate(str(text), 200)}
         count = probe.count(step.target)
-        return {"assert": count > 0, "count": count}
+        return {"ok": count > 0, "assert": count > 0, "count": count}
 
     # -- side channels ------------------------------------------------
     def _do_remember(self, step, task, index):

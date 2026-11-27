@@ -14,7 +14,8 @@ change is allowed to touch.
  │                      Engines                          │
  │  intel · discovery · page · browser · keyboard · mouse│
  │  vision · data · computer · recovery · safety · ui    │
- │  decision · workflow · scheduler · supervisor         │
+ │  pages · actions · react · decision · workflow        │
+ │  fleet · scheduler · supervisor                       │
  └───────────────────────────────────────────────────────┘
                            │
                   transport layer
@@ -135,3 +136,71 @@ Nothing in the suite needs a browser, a network, or a token.
   caller can narrow the label.
 * OS input and shell commands are off by default and allowlisted when on.
 * The model bridge is optional, local-only, and its output is validated.
+
+
+## The reasoning loop (`engines/react.py`)
+
+`WorkflowEngine.run_goal` decides *how* a goal will be carried out before any
+action happens:
+
+```
+plan ──► should_reason()? ──no──► run the plan once (cheap, read-only goals)
+                    │
+                   yes
+                    ▼
+        ReasoningEngine.run(goal, seed_plan)
+          look ─► decide ─► act ─► look …
+```
+
+`decide` has a fixed precedence and it is load-bearing:
+
+1. an unused step of the reviewed plan;
+2. the local model — only when the plan is spent or a step failed;
+3. a heuristic from the page — which may not repeat an `(action, target)` it
+   already performed on this page.
+
+The `done_here` set and the page signature are what keep the loop from
+re-clicking the same button forever; a page that does not change for
+`stale_after` turns ends the run as `stuck`, and three failures in a row end
+it as `failed` with the last real error. Every turn is journaled, and the
+whole trail comes back in `TaskResult.results["thoughts"]`.
+
+`ActionsEngine` is the seam: `WorkflowEngine._do` and the loop both call
+`actions.perform(step)`, so a plan step and a model-proposed step behave
+identically, and the safety engine sees both.
+
+## Page events (`engines/pages.py`)
+
+Two conditions on a real page will not answer a `Runtime.evaluate`:
+
+* a JavaScript dialog is open — the protocol waits until it is answered;
+* the result is in a tab that this click just opened.
+
+`PagesEngine` subscribes to `Target.*` and `Page.javascriptDialog*` on the
+browser channel. `before_action()` snapshots the tab list, `after_action()`
+answers a pending `confirm`, finds the new tab and applies `tabs_policy`.
+The snapshot is taken *before* the click on purpose: a `targetCreated` event
+often arrives before the next look, so comparing afterwards would find
+nothing new.
+
+## The fleet (`engines/fleet.py`)
+
+A fleet worker is a whole `ShadowAI`, not a shared context with a different
+profile id: own registry, own journal, own state directory, own CDP session.
+That is what makes parallelism safe — there is nothing to step on. The fleet
+engine only owns the pool, the job list and the two rules it inherits:
+protected hosts are checked before any worker starts, and one worker's
+exception is one failed job, never a failed fleet.
+
+## Where secrets stop
+
+Three independent gates, because one is not enough:
+
+1. `util.redact` — key names and `pass: …` phrases, for anything logged;
+2. `SafetyEngine.note_typed` — the keyboard engine registers every value it
+   typed into a labelled secret field;
+3. `Journal.scrub` — wired at boot to `SafetyEngine.scrub_output`, so those
+   values are removed *by value* from every journal line before it is written.
+
+Tests assert the strongest form: after a login, the password does not appear
+anywhere in the state directory.

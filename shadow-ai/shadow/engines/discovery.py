@@ -223,7 +223,8 @@ class DiscoveryEngine(Engine):
                             (node.get("attrs") or {}).get("placeholder", ""),
                             (node.get("attrs") or {}).get("name", ""),
                             (node.get("attrs") or {}).get("autocomplete", ""),
-                            node.get("type", "")]).lower()
+                            node.get("label", ""), node.get("text", ""),
+                            node.get("role", ""), node.get("type", "")]).lower()
             score = 0.0
             for word in words:
                 if word == node.get("type", ""):
@@ -233,6 +234,8 @@ class DiscoveryEngine(Engine):
                 if word == (node.get("attrs") or {}).get("name", "").lower():
                     score += 30
                 score += 30 * self.similarity(word, (node.get("attrs") or {}).get("placeholder", ""))
+            if node.get("tag") == "select" and ("select" in words or not node.get("type")):
+                score += 20      # a select is only ever one thing
             if not words:
                 score = 20
             if score > best_score:

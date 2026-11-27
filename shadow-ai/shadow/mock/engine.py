@@ -50,6 +50,9 @@ class MockEngineSession:
         # One websocket can carry several page targets, as a browser does.
         self.docs: Dict[str, MockDocument] = {self.target_id: MockDocument("about:blank")}
         self.active = self.target_id
+        # session history for the active page: back/forward are real CDP verbs
+        self.history: List[str] = []
+        self.history_index = -1
         self.pointer: Optional[Dict[str, float]] = None
         self.closed = False
         self.commands: Dict[str, int] = {}
@@ -135,6 +138,12 @@ class MockEngineSession:
             return {}
         if method in ("Runtime.enable", "Page.enable", "DOM.enable", "Network.enable"):
             return {}
+        if method == "Page.reload":
+            # a reload keeps the address and the dialog-free state, as a real one does
+            self.event("Page.frameNavigated", {"frame": {"id": "frame-1", "url": self.doc.url}})
+            self.doc.load(self.doc.url, page_for(self.doc.url)["html"])
+            self.event("Page.loadEventFired", {"timestamp": time.time()})
+            return {}
         if method == "Runtime.evaluate":
             return self._evaluate(params)
         if method == "Page.navigate":
@@ -190,6 +199,11 @@ class MockEngineSession:
         self.event("Page.frameNavigated", {"frame": {"id": "frame-1", "url": url}})
         self._load(url, page["html"])
         self.pointer = None
+        # A real page has a session history; without one, back/forward are
+        # untestable and a resumed run cannot tell where it is going back to.
+        if not self.history or self.history[-1] != url:
+            self.history.append(url)
+            self.history_index = len(self.history) - 1
         self.event("Page.loadEventFired", {"timestamp": time.time()})
         return {"frameId": "frame-1"}
 
@@ -216,10 +230,22 @@ class MockEngineSession:
             return self._value(self.doc.title)
         if expr == "location.href":
             return self._value(self.doc.url)
+        if expr.startswith("history.back"):
+            self._history(-1)
+            return self._value(None)
+        if expr.startswith("history.forward"):
+            self._history(1)
+            return self._value(None)
+        if "el.options" in expr and "el.value" in expr:
+            return self._value(self._select(expr))
         if "insertAdjacentHTML" in expr:
             for literal in _literals(expr, "insertAdjacentHTML"):
                 self.doc.append_html(literal)
             return self._value(None)
+        if "querySelectorAll" in expr and "getBoundingClientRect" in expr:
+            # the DOM reader being (re)installed with its script, as a re-attach
+            # after a dialog does on a real page
+            return self._value("ok")
         if "querySelector" in expr and ".focus()" in expr:
             for selector in _literals(expr, "querySelector"):
                 node = self.doc.by_id(selector[1:]) if selector.startswith("#") else None
@@ -234,6 +260,32 @@ class MockEngineSession:
         if "getBoundingClientRect" in expr:
             return self._value({"x": 0, "y": 0, "width": 1280, "height": 800})
         return self._value(None)
+
+    def _history(self, delta: int) -> None:
+        index = self.history_index + delta
+        if 0 <= index < len(self.history):
+            self.history_index = index
+            url = self.history[index]
+            self.event("Page.frameNavigated", {"frame": {"id": "frame-1", "url": url}})
+            self.doc.load(url, page_for(url)["html"])
+            self.pointer = None
+            self.event("Page.loadEventFired", {"timestamp": time.time()})
+
+    def _select(self, expr: str) -> bool:
+        """The one evaluate() shadow/engines/actions.py uses to pick an option."""
+        selector = next(iter(_literals(expr, "querySelector")), "")
+        wanted = next((lit for lit in _literals(expr, "includes") if lit), "").lower()
+        node = self.doc.query(selector)[0] if selector and self.doc.query(selector) else None
+        if node is None:
+            return False
+        for option in node.children if hasattr(node, "children") else []:
+            text = option.inner_text().strip().lower()
+            if wanted and wanted in text:
+                self.doc.values[node.id or "select"] = option.get("value") or text or wanted
+                self.doc.focus_id = node.id or self.doc.focus_id
+                self.doc.mutations += 1
+                return True
+        return False
 
     @staticmethod
     def _value(value: Any) -> dict:

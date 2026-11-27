@@ -272,6 +272,11 @@ class PagesEngine(Engine):
         """Answer the newest open dialog. Safe to call when there is none."""
         pending = self.pending_dialogs()
         if not pending:
+            # A dialog nobody raised an event for still blocks the page; ask the
+            # session instead of trusting the event log alone.
+            if self._blocked():
+                pending = [Dialog(kind="unknown", message="blocking dialog")]
+        if not pending:
             return {"answered": False, "reason": "no open dialog"}
         dialog = pending[-1]
         params: Dict[str, Any] = {"accept": bool(accept)}
@@ -281,10 +286,33 @@ class PagesEngine(Engine):
             self.ctx.ensure_cdp().call("Page.handleJavaScriptDialog", params, timeout=10)
         except (CdpError, TransportError) as exc:
             return {"answered": False, "reason": str(exc)[:160], "dialog": dialog.to_dict()}
+        was_pending = dialog in self.pending
         dialog.answered = "accept" if accept else "dismiss"
-        self.pending.remove(dialog)
+        if was_pending:
+            self.pending.remove(dialog)
+        cdp = self.ctx.cdp
+        if cdp is not None and was_pending:
+            # Chrome destroys and rebuilds the page's execution contexts when a
+            # dialog is answered; a DOM snapshot taken before this is stale, and
+            # reusing it is how a run clicks what used to be there.
+            try:
+                cdp.call("Runtime.enable", {}, timeout=10)
+            except (CdpError, TransportError):
+                pass
+            self.ctx.probe.forget()
         self.emit("dialog_answered", kind=dialog.kind, answer=dialog.answered)
-        return {"answered": True, "dialog": dialog.to_dict()}
+        return {"answered": True, "dialog": dialog.to_dict(), "stale_dom": was_pending}
+
+    def _blocked(self) -> bool:
+        """True when the page session will not evaluate: a dialog is open."""
+        cdp = self.ctx.cdp
+        if cdp is None:
+            return False
+        try:
+            cdp.evaluate("document.readyState", timeout=3)
+            return False
+        except (CdpError, TransportError) as exc:
+            return "dialog" in str(exc).lower()
 
     def answer_pending_confirm(self) -> Optional[Dialog]:
         """A `confirm` that a click raised: accept it, because the click meant yes."""

@@ -23,8 +23,12 @@
     "confirm_actions": ["purchase", "payment", "transfer", "delete_account",
                         "send_message", "post_public", "change_password",
                         "download_file", "upload_file"],
+    "redact_values": true,
     "blocked_hosts": ["localhost", "127.0.0.1", "0.0.0.0", "::1",
-                      "169.254.169.254", "metadata.google.internal"]
+                      "169.254.169.254", "metadata.google.internal"],
+    "_protected_hosts_note": "banks, payment processors and government portals: a run that touches one stops as needs_approval before a browser starts",
+    "protected_hosts": ["bank", "banking", "paypal", "stripe.com", "wise.com",
+                        "revolut", "gov", "impots", "tax", "cashplus", "westernunion"]
   },
 
   "human": {
@@ -48,8 +52,24 @@
     "model": "llama3.1",
     "timeout_s": 60,
     "max_tokens": 700,
-    "temperature": 0.2
+    "temperature": 0.2,
+    "retries": 2
   },
+
+  "react": {
+    "enabled": true,
+    "max_turns": 12,
+    "stale_after": 3,
+    "replan_every": 4,
+    "stop_when_answered": true
+  },
+
+  "fleet": {
+    "max_parallel": 3,
+    "seed_per_profile": true
+  },
+
+  "tabs_policy": "switch",
 
   "supervisor": {
     "interval_s": 5.0,

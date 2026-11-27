@@ -205,6 +205,8 @@ class ShadowConfig:
                   "intelligence": IntelligenceConfig, "supervisor": SupervisorConfig,
                   "react": ReactConfig, "fleet": FleetConfig}
         for key, value in (data or {}).items():
+            if key.startswith("_"):
+                continue      # "_comment": a note for a person reading shadow.json
             if key in nested:
                 current = getattr(cfg, key)
                 merged = asdict(current)
