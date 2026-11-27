@@ -78,6 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
     fleet.add_argument("--yes", action="store_true", help="approve irreversible actions up front")
     fleet.add_argument("--background", action="store_true", help="start and return immediately")
 
+    sched = sub.add_parser("schedule", help="a goal on a clock, remembered across restarts")
+    sched.add_argument("goal", nargs="*")
+    sched.add_argument("--every", type=float, default=0.0, help="minutes between runs")
+    sched.add_argument("--name", default="", help="a name for the job")
+    sched.add_argument("--list", action="store_true", help="show saved jobs and exit")
+    sched.add_argument("--cancel", default="", help="cancel a job by id")
+    sched.add_argument("--pause", default="", help="pause a job by id")
+    sched.add_argument("--resume", default="", help="resume a job by id")
+
     approve = sub.add_parser("approve", help="release a task that is waiting for a human")
     approve.add_argument("task_id")
 
@@ -153,6 +162,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _print(store.data if args.json else _memory_text(store))
         if args.verb == "demo":
             return _demo(brain, args)
+        if args.verb == "schedule":
+            return _schedule(brain, args)
         if args.verb == "fleet":
             return _fleet(brain, " ".join(args.goal), args)
         if args.verb == "approve":
@@ -179,6 +190,41 @@ def _run(brain: ShadowAI, goal: str, args) -> int:
         brain.ui.notify("warn", f"to continue: shadow approve {result.task_id}")
         return 3
     return 0 if result.ok else 1
+
+
+def _schedule(brain: ShadowAI, args) -> int:
+    brain.boot()
+    scheduler = brain.engine("scheduler")
+    for verb, past, action in (("cancel", "cancelled", scheduler.cancel),
+                               ("pause", "paused", scheduler.pause),
+                               ("resume", "resumed", scheduler.resume)):
+        job_id = getattr(args, verb, "")
+        if not job_id:
+            continue
+        ok = action(job_id)
+        _print({"job": job_id, "ok": ok} if args.json else
+               (f"{past} {job_id}" if ok else f"no job {job_id}"), args)
+        return 0 if ok else 1
+    goal = " ".join(args.goal)
+    if not goal or args.list:
+        jobs = [job.to_dict() for job in scheduler.jobs.values()]
+        if args.json:
+            print(jdump(jobs, indent=2))
+        else:
+            for job in jobs:
+                print(f"  {job['id']:<20} {job['name'][:30]:<30} every {job['every_s']:>8.0f}s "
+                      f"runs={job['runs']} paused={job['paused']}")
+            if not jobs:
+                print("  no jobs saved")
+        return 0
+    minutes = args.every or 60.0
+    job = scheduler.every_goal(args.name or truncate(goal, 40), goal, minutes * 60.0)
+    if args.json:
+        print(jdump(job.to_dict(), indent=2))
+    else:
+        print(f"  scheduled {job.id} every {minutes:g} min: {goal}")
+        print("  the dashboard keeps it; jobs saved here come back after a restart.")
+    return 0
 
 
 def _fleet(brain: ShadowAI, goal: str, args) -> int:

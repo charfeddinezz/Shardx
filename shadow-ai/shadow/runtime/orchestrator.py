@@ -55,6 +55,7 @@ class ShadowAI:
         self.ui = UiEngine(self.ctx, printer=printer)
         self.mock_launcher = mock_launcher
         self._workers: List[Any] = []
+        self._housekeeping = False
         self._built = False
         self._build()
 
@@ -93,6 +94,9 @@ class ShadowAI:
             r.register(name, engine, depends_on=list(deps))
         # Every journal write passes the safety engine before it reaches disk.
         self.ctx.journal.scrub = lambda data: self.ctx.registry.get("safety").scrub_output(data)
+        # A saved job needs a way back into the workflow; the scheduler does not
+        # import the runtime, it asks the context for this one callable.
+        self.ctx._run_goal = self.run
         self._built = True
 
     # -- fleet ---------------------------------------------------------
@@ -147,6 +151,11 @@ class ShadowAI:
         failed = [n for n, s in report.items() if s != EngineState.READY]
         self.ctx.journal.append("runtime.boot", "-", -1, report=report, profile=self.cfg.default_profile,
                                 mock=self.cfg.mock, version=_version())
+        scheduler = self.ctx.registry.get("scheduler")
+        if "scheduler" in self.ctx.registry and not getattr(self, "_housekeeping", False):
+            # every hour: the journal is append-only, so something has to trim it
+            scheduler.every("journal compaction", scheduler.compact_journal, 3600.0)
+            self._housekeeping = True
         self.ui.notify("ok" if not failed else "warn",
                        f"SHADOW AI up: {len(report) - len(failed)}/{len(report)} engines"
                        + (f" · failed: {', '.join(failed)}" if failed else ""))

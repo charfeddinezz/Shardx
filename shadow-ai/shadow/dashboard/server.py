@@ -100,6 +100,8 @@ class Dashboard:
                     return self._json([e.to_dict() for e in entries[-200:]])
                 if path.path == "/api/fleet":
                     return self._json(dashboard.fleet_report())
+                if path.path == "/api/schedule":
+                    return self._json(dashboard.schedule_report())
                 if path.path == "/api/health":
                     return self._json({"ok": True, "uptime_s": round(time.time() - dashboard.started, 1)})
                 return self._json({"error": "not found"}, 404)
@@ -121,6 +123,19 @@ class Dashboard:
                         return self._json({"error": "a task is already running", **dashboard.last()}, 409)
                     dashboard.run_async(goal, approved=bool(body.get("approved")))
                     return self._json({"started": goal})
+                if path.path == "/api/schedule":
+                    action = (body.get("action") or "add").strip()
+                    minutes = float(body.get("minutes") or 60)
+                    if action == "add":
+                        goal = (body.get("goal") or "").strip()
+                        if not goal:
+                            return self._json({"error": "a goal is required"}, 400)
+                        job = dashboard.schedule_add(goal, minutes, body.get("name") or "")
+                        return self._json(job)
+                    job_id = (body.get("job_id") or "").strip()
+                    ok = {"cancel": dashboard.schedule_cancel, "pause": dashboard.schedule_pause,
+                          "resume": dashboard.schedule_resume}.get(action, lambda _: False)(job_id)
+                    return self._json({"job_id": job_id, "ok": ok})
                 if path.path == "/api/fleet":
                     goal = (body.get("goal") or "").strip()
                     if not goal:
@@ -188,6 +203,25 @@ class Dashboard:
                 self.brain.ui.notify("err", f"fleet: {type(exc).__name__}: {exc}")
         threading.Thread(target=work, name="shadow-dashboard-fleet", daemon=True).start()
 
+    def schedule_add(self, goal: str, minutes: float, name: str = "") -> Dict[str, Any]:
+        scheduler = self.brain.engine("scheduler")
+        job = scheduler.every_goal(name or goal[:40], goal, max(1.0, float(minutes)) * 60.0)
+        return job.to_dict()
+
+    def schedule_cancel(self, job_id: str) -> bool:
+        return self.brain.engine("scheduler").cancel(job_id)
+
+    def schedule_pause(self, job_id: str) -> bool:
+        return self.brain.engine("scheduler").pause(job_id)
+
+    def schedule_resume(self, job_id: str) -> bool:
+        return self.brain.engine("scheduler").resume(job_id)
+
+    def schedule_report(self) -> Dict[str, Any]:
+        scheduler = self.brain.engine("scheduler")
+        # a saved goal is the only kind a person can act on from the dashboard
+        return {"jobs": [j.to_dict() for j in scheduler.jobs.values() if j.goal]}
+
     def fleet_report(self) -> Dict[str, Any]:
         engine = self.brain.engine("fleet")
         return engine.report()
@@ -202,6 +236,7 @@ class Dashboard:
             "running": self.busy(),
             "last": self.last(),
             "fleet": self.fleet_report(),
+            "schedule": self.schedule_report(),
         }
 
 
@@ -259,6 +294,13 @@ PAGE = r"""<!doctype html>
     <table id="fleetTbl"></table>
   </section>
   <section>
+    <h2>Schedule</h2>
+    <form id="sf"><input id="schedGoal" type="text" placeholder="a goal to repeat" autocomplete="off">
+      <input id="schedEvery" type="number" min="1" value="60" style="width:80px" title="minutes">
+      <button id="schedAdd">Save</button></form>
+    <table id="schedTbl"></table>
+  </section>
+  <section>
     <h2>Engines</h2>
     <table id="enginesTbl"></table>
   </section>
@@ -307,6 +349,18 @@ async function refresh() {
         <td>${esc(j.profile)}</td><td class="dim">${esc((j.answer || j.error || j.goal || "").slice(0, 70))}</td>
         <td class="dim">${esc(j.ms)}ms</td></tr>`).join("")
       : `<tr><td class="dim" colspan="4">no fleet jobs yet</td></tr>`;
+    const sched = (s.schedule && s.schedule.jobs) || [];
+    $("schedTbl").innerHTML = sched.length ? sched.map(j =>
+      `<tr><td class="${j.paused ? "warn" : "ok"}">${j.paused ? "paused" : "saved"}</td>
+        <td>${esc(j.name)}</td><td class="dim">every ${Math.round(j.every_s / 60)}m · runs ${esc(j.runs)}</td>
+        <td><button data-job="${esc(j.id)}" data-act="${j.paused ? "resume" : "pause"}">${j.paused ? "resume" : "pause"}</button>
+            <button data-job="${esc(j.id)}" data-act="cancel">cancel</button></td></tr>`).join("")
+      : `<tr><td class="dim" colspan="4">no saved jobs</td></tr>`;
+    $("schedTbl").querySelectorAll("button").forEach(b => b.onclick = async () => {
+      await fetch("api/schedule", {method:"POST", headers: authHeaders,
+                                   body: JSON.stringify({action: b.dataset.act, job_id: b.dataset.job})});
+      refresh();
+    });
     $("log").textContent = (s.lines || []).join("\n") || "…";
     $("log").scrollTop = 1e9;
 
@@ -341,6 +395,16 @@ function showResult(r) {
     $("steps").appendChild(b);
   }
 }
+
+$("sf").onsubmit = async (e) => {
+  e.preventDefault();
+  const goal = $("schedGoal").value.trim();
+  if (!goal) return;
+  await fetch("api/schedule", {method:"POST", headers: authHeaders,
+                               body: JSON.stringify({goal, minutes: Number($("schedEvery").value) || 60})});
+  $("schedGoal").value = "";
+  refresh();
+};
 
 $("ff").onsubmit = async (e) => {
   e.preventDefault();

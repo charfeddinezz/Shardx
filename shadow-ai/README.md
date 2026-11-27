@@ -93,7 +93,7 @@ supervisor restart one without touching the others.
 | 🎛️ **Smart UI** | `engines/ui.py` | Terminal ticker, notifications, state document for the dashboard |
 | 🔄 **Recovery** | `engines/recovery.py` | Classifies a failure, then settles / re-waits / reattaches / reloads |
 | ⚙️ **Workflow** | `engines/workflow.py` | Goal → steps → actions, journaled per step |
-| ⏱️ **Scheduler** | `engines/scheduler.py` | `every()` and `after()` jobs on their own thread, failures contained |
+| ⏱️ **Scheduler** | `engines/scheduler.py` | `every()`/`after()` jobs, saved goals in `jobs.json`, hourly journal compaction |
 | 🛡️ **Safety** | `engines/safety.py` | URL and action policy, approvals, budgets — the last gate |
 | 🧭 **Decision** | `engines/decision.py` | Chooses the next action from plan, model, or page; validates model output |
 | 🧩 **Browser** | `engines/browser.py` | Profile lifecycle and the CDP attachment the rest share |
@@ -229,6 +229,8 @@ print(brain.engine("supervisor").report())
 | `shadow demo` | The scripted mock run |
 | `shadow memory` | What SHADOW remembers |
 | `shadow approve <task>` | Continue a task that stopped for approval |
+| `shadow schedule "<goal>" --every 30` | A goal on a clock, remembered across restarts |
+| `shadow schedule --list` / `--pause` / `--resume` / `--cancel <id>` | Manage saved jobs |
 | `shadow serve [--port 40330]` | Local dashboard |
 
 Global flags: `--mock`, `--json`, `--quiet`, `--profile`, `--state`,
@@ -343,7 +345,7 @@ with ShadowAI(cfg) as brain:
 ## 9. Tests
 
 ```bash
-python run_tests.py -v      # 186 tests, no browser, no network
+python run_tests.py -v      # 196 tests, no browser, no network
 ```
 
 The suite runs the whole system against the mock engine: the WebSocket framing,
@@ -385,8 +387,10 @@ Said plainly, because the difference matters:
   editing session.
 * **`shadow init` does not exist.** Configuration is `shadow.json` (or
   `shadow.json.example`, which lists every key) plus `--token`.
-* **The scheduler does not persist.** Jobs live as long as the process;
-  `journal.compact()` is implemented but never scheduled.
+* **Only saved goals persist, not closures.** A job added with `goal=`
+  (the CLI, the dashboard, `every_goal`) is written to `jobs.json` and comes
+  back on the next boot; a job added with a Python closure cannot be, and says
+  so rather than pretending. The journal is compacted hourly and keeps its tail.
 
 ---
 
@@ -400,7 +404,7 @@ Said plainly, because the difference matters:
 | `Motion domain missing` in `doctor` | This engine build has no `Motion`; input falls back to `Input.*` and the run is marked degraded |
 | `element did not keep the value` | The field clears itself on blur; the keyboard engine retries once, then fails honestly |
 | A run stops at `needs_approval` | That is the safety engine. `shadow approve <task-id>` |
-| Job never fires | `scheduler.every()` takes seconds, minimum 0.05 |
+| Job never fires | `scheduler.every()` takes seconds, minimum 0.05; a paused job has `next_at = 0` and stays paused across restarts |
 
 ---
 
@@ -420,7 +424,7 @@ shadow-ai/
 │   ├── runtime/orchestrator.py the only place that knows the whole cast
 │   ├── mock/                   launcher · CDP engine · DOM · pages
 │   └── dashboard/              one HTML page and a small JSON API
-├── tests/                      186 tests (incl. fake launcher + fake model)
+├── tests/                      196 tests (incl. fake launcher + fake model)
 └── docs/                       architecture · writing an engine
 ```
 
