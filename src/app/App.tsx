@@ -12,6 +12,7 @@ import { ConfirmHost } from "../widgets/ConfirmHost/ConfirmHost";
 import { PasswordHost } from "../widgets/PasswordHost/PasswordHost";
 import { UnsavedGuard } from "../widgets/UnsavedGuard/UnsavedGuard";
 import { StarModal } from "../widgets/StarModal/StarModal";
+import { AssistantHost } from "../widgets/Assistant";
 import { HelperWatcher } from "../widgets/HelperWatcher";
 import { WhatsNewGate } from "../widgets/WhatsNewGate";
 import { PsTrialModal } from "../features/proxyshard";
@@ -349,6 +350,7 @@ function Shell() {
         {section === "team" && <LazyPage section="team"><TeamPage /></LazyPage>}
       </main>
       <ToastHost />
+      <AssistantHost />
       <ConfirmHost />
       <UnsavedGuard />
       <StarModal />

@@ -95,8 +95,9 @@ for (const file of files) {
     if (TEXT_PROPS.has(m[1]) && human(m[2])) problems.push([rel, at(m.index), `${m[1]}="${m[2]}"`]);
   }
   // A command's id ("palette.run", E2's registry) names a command, not a key.
-  // The tour's steps (src/features/tour/steps) hold their keys as plain strings.
-  for (const m of src.matchAll(/(?<!\bid:\s*)"((?:palette|blockPicker|helperKinds|labelColors|folderIcons|views|shortcuts|errors|launcherWarning|tour)\.[A-Za-z0-9_.]+)"/g)) called.add(m[1]);
+  // The tour's steps (src/features/tour/steps) hold their keys as plain strings,
+  // as do the assistant's intent database and knowledge base.
+  for (const m of src.matchAll(/(?<!\bid:\s*)"((?:palette|blockPicker|helperKinds|labelColors|folderIcons|views|shortcuts|errors|launcherWarning|tour|assistant)\.[A-Za-z0-9_.]+)"/g)) called.add(m[1]);
 }
 
 const en = JSON.parse(readFileSync(join(LOCALES, "en.json"), "utf8"));
