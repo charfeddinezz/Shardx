@@ -43,11 +43,17 @@ class Journal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._sync = sync
+        self.scrub = None           # set by the runtime: SafetyEngine.scrub_output
         self._handle = open(self.path, "a", encoding="utf-8")
 
     # -- writing ------------------------------------------------------
     def append(self, kind: str, task_id: str = "", step: int = -1, **data: Any) -> JournalEntry:
         entry = JournalEntry(kind=kind, task_id=task_id, step=step, data=data)
+        scrubber = self.scrub
+        if scrubber is not None:
+            # Values typed into secret fields are removed by value, not only by
+            # key, before the line ever reaches the disk.
+            entry.data = scrubber(entry.data)
         line = json.dumps(entry.to_dict(), ensure_ascii=False, default=str)
         with self._lock:
             self._handle.write(line + "\n")

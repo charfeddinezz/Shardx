@@ -20,6 +20,7 @@ from ..core.context import ShadowContext
 from ..core.events import EventBus
 from ..core.journal import Journal
 from ..core.registry import EngineState
+from ..engines.actions import ActionsEngine
 from ..engines.browser import BrowserEngine
 from ..engines.computer import ComputerEngine
 from ..engines.data import DataEngine
@@ -29,6 +30,8 @@ from ..engines.input import KeyboardEngine, MouseEngine
 from ..engines.intelligence import IntelligenceEngine
 from ..engines.memory import MemoryEngine
 from ..engines.page_understanding import PageUnderstandingEngine
+from ..engines.pages import PagesEngine
+from ..engines.react import ReasoningEngine
 from ..engines.recovery import RecoveryEngine
 from ..engines.safety import SafetyEngine
 from ..engines.scheduler import SchedulerEngine
@@ -61,6 +64,7 @@ class ShadowAI:
             ("discovery", DiscoveryEngine(self.ctx), ()),
             ("page", PageUnderstandingEngine(self.ctx), ()),
             ("browser", BrowserEngine(self.ctx), ()),
+            ("pages", PagesEngine(self.ctx), ("browser",)),
             ("keyboard", KeyboardEngine(self.ctx), ("browser",)),
             ("mouse", MouseEngine(self.ctx), ("browser",)),
             ("vision", VisionEngine(self.ctx), ()),
@@ -69,14 +73,21 @@ class ShadowAI:
             ("recovery", RecoveryEngine(self.ctx), ()),
             ("ui", self.ui, ()),
             ("decision", DecisionEngine(self.ctx), ("intel", "page")),
+            ("actions", ActionsEngine(self.ctx), ("safety", "discovery", "keyboard", "mouse",
+                                                  "page", "data", "memory", "browser", "pages")),
+            ("react", ReasoningEngine(self.ctx), ("actions", "decision", "page", "safety",
+                                                  "memory", "intel")),
             ("workflow", WorkflowEngine(self.ctx, ui=self.ui), ("intel", "memory", "safety", "browser",
                                                                 "keyboard", "mouse", "discovery",
-                                                                "page", "data", "recovery")),
+                                                                "page", "data", "recovery", "actions",
+                                                                "react")),
             ("scheduler", SchedulerEngine(self.ctx), ()),
             ("supervisor", AutonomousSupervisor(self.ctx, on_resume=self._on_resume), ("workflow", "browser")),
         ]
         for name, engine, deps in engines:
             r.register(name, engine, depends_on=list(deps))
+        # Every journal write passes the safety engine before it reaches disk.
+        self.ctx.journal.scrub = lambda data: self.ctx.registry.get("safety").scrub_output(data)
         self._built = True
 
     # -- lifecycle ----------------------------------------------------

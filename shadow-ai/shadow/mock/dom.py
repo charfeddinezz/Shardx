@@ -29,6 +29,7 @@ class MockDocument:
         self.values: Dict[str, str] = {}
         self.scroll_y = 0
         self.timers: List[Dict[str, Any]] = []
+        self.dialog: Optional[Dict[str, str]] = None
         self.mutations = 0
         self.load(url, "")
 

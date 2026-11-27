@@ -43,6 +43,14 @@ class EndToEndTest(BrainCase):
         self.assertIn("/search?q=lamp", brain.ctx.cdp.current_url())
         self.assertEqual([s.status for s in result.steps], ["done"] * len(result.steps))
 
+    def test_a_reasoned_goal_ticks_its_plan_off_as_it_goes(self):
+        brain = self.brain(react={"enabled": True})
+        result = brain.run("Open http://shop.local/ and click Contact")
+        self.assertEqual(result.status, "done", result.error)
+        self.assertTrue(result.results.get("thoughts"))
+        self.assertEqual([s.status for s in result.steps], ["done"] * len(result.steps))
+        self.assertEqual(result.results.get("turns"), len(result.results["thoughts"]))
+
     def test_login_goal_signs_in_and_reads_the_title(self):
         brain = self.brain()
         result = brain.run("Open http://login.local/ user: admin pass: hunter2 then read the title")
@@ -121,7 +129,7 @@ class SupervisorTest(BrainCase):
     def test_every_engine_is_healthy_after_boot(self):
         brain = self.brain()
         health = brain.ctx.registry.health()
-        self.assertEqual(len(health), 17)
+        self.assertEqual(len(health), len(brain.ctx.registry.names()))
         self.assertEqual([n for n, e in health.items() if not e["healthy"]], [])
 
     def test_a_dead_engine_is_restarted(self):
@@ -224,7 +232,7 @@ class SupervisorTest(BrainCase):
     def test_report_lists_engines_and_incidents(self):
         brain = self.brain()
         report = brain.engine("supervisor").report()
-        self.assertEqual(len(report["engines"]), 17)
+        self.assertEqual(len(report["engines"]), len(brain.ctx.registry.names()))
         self.assertIn("watching", report)
 
 

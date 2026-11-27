@@ -144,9 +144,15 @@ class KeyboardEngine(Engine):
         if clear and "mouse" in self.ctx.registry:
             self.clear_field(probe, node)   # select-all needs a pointer; skipping is safe
         result = self.type(value, allow_typos=allow_typos)
+        # A secret typed into a labelled field is remembered only so it can be
+        # scrubbed from output later; the value itself never goes anywhere else.
+        if "safety" in self.ctx.registry:
+            self.engine("safety").note_typed(value, node=node)
         actual = probe.value(element_id) if element_id else None
         result["verified"] = (actual == value) if actual is not None else None
         result["actual"] = actual
+        if "safety" in self.ctx.registry:
+            self.engine("safety").note_typed(value, node=node)
         if result["verified"] is False and actual is not None and actual != value:
             # Some widgets clear themselves on blur; type once more before failing.
             self.click_node(probe, node)

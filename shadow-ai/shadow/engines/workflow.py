@@ -29,6 +29,12 @@ from .base import Engine
 
 MAX_TEXT = 1200
 
+# Actions that change where we are or what we submit: a goal naming any of
+# these is carried out by the reasoning loop, which looks after every step.
+# Reading a page, extracting and asserting are one-shot and stay plan-driven.
+ITERATIVE = {"goto", "find", "click", "fill", "login", "submit", "purchase", "back",
+             "type", "select", "press"}
+
 
 @dataclass
 class Step:
@@ -92,6 +98,7 @@ class Task:
     results: Dict[str, Any] = field(default_factory=dict)
     started_at: float = 0.0
     steps_done: int = 0
+    step_index: int = 0          # how far the plan has been walked
     status: str = "pending"
     approvals: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -186,7 +193,41 @@ class WorkflowEngine(Engine):
             self.ctx.profile_id = profile
         task = self.plan(goal)
         task.approved = approved
+        # A protected host is refused *before* a browser is started, so saying
+        # no leaves no trace on the machine and no session open.
+        try:
+            safety = self.engine("safety")
+            for step in task.steps:
+                if step.action == "goto" and step.target:
+                    safety.check_url(step.target, approved=approved)
+        except ApprovalRequired as exc:
+            task.status = "needs_approval"
+            result = TaskResult(task_id=task.id, goal=goal, status="needs_approval",
+                                error=exc.message, steps=task.steps)
+            result.approvals = [{"category": "protected_host", "target": step.target}]
+            task.approvals.extend(result.approvals)
+            self.ctx.journal.append("task.needs_approval", task.id, -1, **exc.to_dict())
+            self._line("warn", f"a person has to allow this first: {exc.message}")
+            return result
+        if self.should_reason(task, goal):
+            return self.reason_about(task, approved=approved)
         return self.run(task, resume=resume)
+
+    # -- when to iterate instead of executing a list -------------------
+    @staticmethod
+    def should_reason(task: Task, goal: str) -> bool:
+        """A plan that is only "look and answer" needs one look, not a loop."""
+        actions = [s.action for s in task.steps if s.action != "finish"]
+        if not actions:
+            return True
+        return any(a in ITERATIVE for a in actions)
+
+    def reason_about(self, task: Task, approved: bool = False) -> TaskResult:
+        """Run the goal through the reasoning loop, keeping the plan as the
+        fallback the loop may ask for when it has no idea what to do next."""
+        loop = self.engine("react")
+        task.approved = approved
+        return loop.run(task.goal, seed_plan=task, approved=approved)
 
     def run(self, task: Task, resume: bool = True) -> TaskResult:
         self.tasks_run += 1
@@ -195,8 +236,10 @@ class WorkflowEngine(Engine):
         task.status = "running"
         result = TaskResult(task_id=task.id, goal=task.goal, status="running",
                             steps=task.steps, results=task.results)
+        safe_steps = [self.engine("safety").redact_step(s, approved=bool(task.approved))
+                      for s in task.steps]
         self.ctx.journal.append("task.started", task.id, -1, goal=task.goal,
-                                profile=task.profile, steps=[s.to_dict() for s in task.steps])
+                                profile=task.profile, steps=[s.to_dict() for s in safe_steps])
         self.ctx.bus.publish("task.started", source=self.name, task=task.id,
                              goal=truncate(task.goal, 120), steps=len(task.steps))
         self._banner(task)
@@ -205,9 +248,18 @@ class WorkflowEngine(Engine):
         if resume:
             point = self.engine("memory").resume_point(task.id)
             if point and point.get("step", -1) >= 0:
-                start_index = int(point["step"]) + 1
-                result.resumed_from = start_index - 1
-                self._line("info", f"resuming at step {start_index + 1}/{len(task.steps)} from the journal")
+                planned = (point.get("state") or {}).get("steps")
+                if planned is not None and not _same_plan(planned, task.steps):
+                    # A resume that replays a different plan than the one that
+                    # was interrupted is how a run types yesterday's answer into
+                    # today's form. Start over instead, and say why.
+                    self._line("warn", "the recorded plan does not match this goal; starting from step 1")
+                    self.ctx.journal.append("resume.rejected", task.id, -1,
+                                            reason="plan changed")
+                else:
+                    start_index = int(point["step"]) + 1
+                    result.resumed_from = start_index - 1
+                    self._line("info", f"resuming at step {start_index + 1}/{len(task.steps)} from the journal")
         task.results.setdefault("history", [])
 
         try:
@@ -221,7 +273,10 @@ class WorkflowEngine(Engine):
                 task.results["step"] = index
                 self._run_step(task, step, index)
                 task.steps_done += 1
-                self.engine("memory").checkpoint(task.id, index, {"url": self._url()})
+                self.engine("memory").checkpoint(task.id, index,
+                                                 {"url": self._url(),
+                                                  "steps": [(st.action, st.target[:60])
+                                                            for st in task.steps]})
             result.status = "done"
             self._line("ok", f"done: {truncate(task.goal, 60)}")
         except ApprovalRequired as exc:
@@ -322,197 +377,12 @@ class WorkflowEngine(Engine):
         return output
 
     def _do(self, task: Task, step: Step, index: int) -> Any:
-        ctx = self.ctx
-        safety = self.engine("safety")
-        keyboard = self.engine("keyboard")
-        mouse = self.engine("mouse")
-        discovery = self.engine("discovery")
-        page = self.engine("page")
-        data = self.engine("data")
-        memory = self.engine("memory")
-        action = step.action
+        """One step, carried out by the actions engine.
 
-        if action == "goto":
-            verdict = safety.check_url(step.target)
-            safety.enforce(verdict)
-            cdp = ctx.ensure_cdp()
-            cdp.navigate(step.target)
-            return {"url": cdp.current_url(), "title": cdp.title()}
-
-        if action == "finish":
-            return {"finished": True}
-
-        if action == "wait":
-            time.sleep(float(step.value or 1.0))
-            return {"waited_s": float(step.value or 1.0)}
-
-        if action == "back":
-            cdp = ctx.ensure_cdp()
-            cdp.evaluate("history.back()")
-            cdp.wait_ready()
-            return {"url": cdp.current_url()}
-
-        if action == "verify_loaded":
-            cdp = ctx.ensure_cdp()
-            return {"loaded": cdp.wait_ready(timeout=30), "url": cdp.current_url()}
-
-        probe = ctx.page()
-        model = page.understand(probe, ctx.cdp)
-        url = model.url
-
-        if action == "find":
-            field = discovery.find_field(probe, "search")
-            if field is not None:
-                keyboard.fill_field(probe, field.node, step.target)
-                keyboard.press("Enter")
-                ctx.cdp.wait_ready()
-                return {"searched": step.target, "url": ctx.cdp.current_url()}
-            candidate = discovery.pick_or_none(probe, step.target)
-            if candidate is not None:
-                mouse.click_element(probe, candidate.node)
-                ctx.cdp.wait_ready()
-                return {"clicked": candidate.label, "url": ctx.cdp.current_url()}
-            raise ElementNotFound(f"no search field and no link matching {step.target!r}")
-
-        if action == "fill":
-            field = discovery.find_field(probe, step.target)
-            if field is None:
-                raise ElementNotFound(f"no field matching {step.target!r}")
-            sensitive = safety.check_action("fill", target=step.target, value=step.value)
-            filled = keyboard.fill_field(probe, field.node, step.value)
-            if filled.get("verified") is False:
-                raise StepFailed(f"field {step.target!r} did not keep the value", step=index)
-            memory.learn(url, "field:" + step.target, field.node.get("selector"))
-            return {"field": field.node.get("selector"), "verified": filled.get("verified"),
-                    "sensitive": bool(sensitive)}
-
-        if action == "login":
-            user = step.target or memory.recall("user", namespace="credentials", default="")
-            password = step.value or memory.recall("password", namespace="credentials", default="")
-            if not user or not password:
-                raise ElementNotFound("login needs a user and a password: "
-                                      "'log in with user: X pass: Y'")
-            safety.check_action("login", target="login", value="password")
-            user_field = discovery.find_field(probe, "username") or discovery.find_field(probe, "email")
-            pass_field = discovery.find_field(probe, "password")
-            if user_field is None or pass_field is None:
-                raise ElementNotFound("this page has no username/password pair")
-            keyboard.fill_field(probe, user_field.node, user)
-            keyboard.fill_field(probe, pass_field.node, password)
-            submit = discovery.pick_or_none(probe, "sign in button") or discovery.pick_or_none(probe, "log in button")
-            if submit is not None:
-                mouse.click_element(probe, submit.node)
-            else:
-                keyboard.press("Enter")
-            ctx.cdp.wait_ready()
-            memory.remember("user", user, "credentials")
-            memory.remember("password", safety.redact(password), "credentials")
-            return {"logged_in": True, "url": ctx.cdp.current_url()}
-
-        if action == "click":
-            verdict = safety.check_action("click", target=step.target, url=url,
-                                          approved=task.approved)
-            candidate = discovery.pick(probe, step.target)
-            mouse.click_element(probe, candidate.node)
-            memory.learn(url, "click:" + step.target, candidate.selector)
-            ctx.cdp.wait_ready()
-            return {"clicked": candidate.label, "selector": candidate.selector,
-                    "url": ctx.cdp.current_url()}
-
-        if action == "submit":
-            label = step.target or "submit"
-            verdict = safety.check_action("submit", target=label, url=url,
-                                          approved=task.approved)
-            candidate = discovery.pick_or_none(probe, label)
-            if candidate is None:
-                candidate = discovery.pick_or_none(probe, "submit button")
-            if candidate is not None:
-                mouse.click_element(probe, candidate.node)
-            else:
-                keyboard.press("Enter")
-            ctx.cdp.wait_ready()
-            return {"submitted": True, "url": ctx.cdp.current_url()}
-
-        if action == "press":
-            return keyboard.press(step.target)
-
-        if action == "scroll":
-            return mouse.scroll(step.target or "down", int(step.value or 480))
-
-        if action == "type":
-            return keyboard.type(step.value or step.target)
-
-        if action == "read":
-            target = step.target
-            if target in ("title", "page title", "heading"):
-                return ctx.cdp.title() if ctx.cdp else ""
-            if target == "url":
-                return url
-            if target in ("", "page", "text"):
-                answer = page.answer(model, step.value or task.goal)
-                return answer["answer"] or truncate(model.text, MAX_TEXT)
-            if target.startswith(("#", ".", "[")) or " " in target:
-                try:
-                    text = probe.text(target)
-                except Exception:
-                    text = None
-                if text:
-                    return text
-                candidate = discovery.pick_or_none(probe, target)
-                if candidate is not None:
-                    return candidate.node.get("text") or candidate.node.get("name")
-                raise ElementNotFound(f"nothing to read at {target!r}")
-            if target in ("price", "prices", "total", "amount"):
-                prices = data.prices(probe)
-                if prices:
-                    return prices[0]["amount"]
-            candidate = discovery.pick_or_none(probe, target)
-            if candidate is not None:
-                return candidate.node.get("text") or candidate.node.get("name")
-            answer = page.answer(model, step.value or target)
-            if answer["answer"]:
-                return answer["answer"]
-            return {"text": truncate(model.text, 400), "title": model.title}
-
-        if action == "extract":
-            if step.target in ("table", "tables"):
-                return data.table(probe)
-            if step.target in ("links", "link"):
-                return data.links(probe)
-            if step.target in ("fields", "form"):
-                return data.fields(probe)
-            return data.list_items(probe, step.target or "li")
-
-        if action == "remember":
-            memory.remember(step.target or "note", step.value, "task:" + task.id)
-            return {"remembered": step.target}
-
-        if action == "assert":
-            return self._assert(probe, step)
-
-        if action == "approve":
-            if task.approved:
-                return {"approved": True, "action": step.target}
-            raise ApprovalRequired(f"the goal asks for an irreversible action: {truncate(step.target, 100)}",
-                                   category="purchase", task=task.id)
-
-        if action == "screenshot":
-            vision = self.engine("vision")
-            frame = vision.shot()
-            return frame.to_dict()
-
-        if action == "ocr":
-            return self.engine("vision").ocr()
-
-        raise StepFailed(f"unknown step action {action!r}", step=index)
-
-    def _assert(self, probe, step: Step) -> Dict[str, Any]:
-        if step.target.startswith(("#", ".", "[")):
-            actual = probe.text(step.target)
-            ok = bool(actual and (step.value in actual if step.value else actual))
-            return {"assert": ok, "actual": truncate(actual or "", 200)}
-        count = probe.count(step.target)
-        return {"assert": count > 0, "count": count}
+        Nothing here decides *what* to do — that is the plan's job, and the
+        reasoning loop's. This is the seam that lets both share one executor.
+        """
+        return self.engine("actions").perform(step, task=task, index=index)
 
     # -- presentation --------------------------------------------------
     def _banner(self, task: Task) -> None:
@@ -540,7 +410,23 @@ class WorkflowEngine(Engine):
         return info
 
 
+def _same_plan(recorded: Any, steps: List[Step]) -> bool:
+    """Does the journal's plan agree with the one we just built?"""
+    if not isinstance(recorded, (list, tuple)):
+        return False
+    live = [(st.action, st.target[:60]) for st in steps]
+    try:
+        return [tuple(item) for item in recorded] == live
+    except TypeError:
+        return False
+
+
 def _summarise(output: Any) -> str:
+    from .actions import summarise
+    return summarise(output)
+
+
+def _unused_summarise(output: Any) -> str:
     if output is None:
         return ""
     if isinstance(output, str):

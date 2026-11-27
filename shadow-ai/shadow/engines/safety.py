@@ -9,12 +9,14 @@ itself, and it never blocks a read.
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 from ..errors import ApprovalRequired, SafetyViolation
+from ..util import truncate
 from .base import Engine
 
 SENSITIVE_LABEL = re.compile(
@@ -24,6 +26,21 @@ PAYMENT_TEXT = re.compile(r"(?i)\b(pay\s*now|place\s*order|complete\s*(purchase|
                           r"confirm\s*payment|ادفع|أكد الطلب|payer maintenant)\b")
 DESTRUCTIVE_TEXT = re.compile(r"(?i)\b(delete|remove|erase|cancel\s+(order|account)|unsubscribe|"
                               r"احذف|إلغاء|supprimer)\b")
+
+
+def _scrub(value: Any, secrets: set) -> Any:
+    if not secrets:
+        return value
+    if isinstance(value, str):
+        for secret in secrets:
+            if secret in value:
+                value = value.replace(secret, "<redacted>")
+        return value
+    if isinstance(value, dict):
+        return {k: _scrub(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub(v, secrets) for v in value]
+    return value
 
 
 @dataclass
@@ -46,13 +63,26 @@ class SafetyEngine(Engine):
         self.checked = 0
         self.blocked = 0
         self.approvals = 0
+        # Values the run typed into fields it considers sensitive. Kept only so
+        # they can be removed from anything that is written out; `set` of
+        # strings, capped, never read by a planner.
+        self.typed_values: set = set()
 
     # -- URL ----------------------------------------------------------
-    def check_url(self, url: str) -> Verdict:
+    def check_url(self, url: str, approved: bool = False) -> Verdict:
         self.checked += 1
         cfg = self.ctx.cfg.safety
         parts = urlsplit(url or "")
         host = (parts.hostname or "").lower()
+        if not approved:
+            for pattern in cfg.protected_hosts:
+                if pattern and (pattern in host or pattern in (url or "").lower()):
+                    self.checked += 1
+                    self.emit("protected_host", host=host[:80], pattern=pattern)
+                    raise ApprovalRequired(
+                        f"{host or url} matches a protected pattern ({pattern!r}): banks, "
+                        "payment processors and government portals need a person to say yes",
+                        category="protected_host", url=url)
         if parts.scheme not in ("http", "https"):
             return self._block("url", f"scheme {parts.scheme or '(none)'} is not http(s)", url=url)
         if cfg.https_only and parts.scheme != "https":
@@ -105,6 +135,70 @@ class SafetyEngine(Engine):
         if not self.ctx.cfg.safety.redact_sensitive_inputs:
             return value
         return "<redacted>" if value else ""
+
+    @classmethod
+    def looks_sensitive(cls, label: str, node: Optional[Dict[str, Any]] = None) -> bool:
+        """Is this field a secret? Safe to ask before an engine exists."""
+        node = node or {}
+        if node.get("type") in ("password",):
+            return True
+        text = " ".join([label or "", node.get("name", ""), node.get("id", ""),
+                         node.get("type", ""), node.get("label", ""), node.get("placeholder", "")])
+        return bool(SENSITIVE_LABEL.search(text))
+
+    def is_sensitive_field(self, label: str, node: Optional[Dict[str, Any]] = None) -> bool:
+        return self.looks_sensitive(label, node)
+
+    def note_typed(self, value: str, label: str = "", node: Optional[Dict[str, Any]] = None,
+                   force: bool = False) -> bool:
+        """Record a typed value for scrubbing when the field is a secret.
+
+        Called by the keyboard engine after every fill, so plain typing into a
+        labelled password/card field is covered without the planner knowing.
+        """
+        if not value or len(value) < 3:
+            return False
+        if not (force or self.is_sensitive_field(label, node)):
+            return False
+        if len(self.typed_values) > 64:
+            self.typed_values.clear()   # bounded: a long run must not grow forever
+        self.typed_values.add(value)
+        return True
+
+    def typed_secrets(self) -> set:
+        return set(self.typed_values)
+
+    def redact_step(self, step, approved: bool = False) -> Any:
+        """A copy of a step that is safe to journal: a login password becomes
+        `<redacted>`, and the actual value is registered for later scrubbing."""
+        if getattr(step, "action", "") not in ("login", "fill", "type"):
+            return step
+        value = getattr(step, "value", "") or ""
+        label = getattr(step, "target", "") or getattr(step, "action", "")
+        if not value or not (approved or getattr(step, "action", "") == "login"):
+            return step
+        if not self.is_sensitive_field(label) and getattr(step, "action", "") != "login":
+            return step
+        self.note_typed(value, force=True)
+        try:
+            clean = copy.copy(step)
+            clean.value = "<redacted>"
+            return clean
+        except Exception:  # noqa: BLE001 - a frozen step still journals as-is
+            return step
+
+    def scrub_output(self, output: Any, sensitive_values: Optional[set] = None) -> Any:
+        """Values typed into sensitive fields must not survive into a journal.
+
+        The journal already redacts keys; this removes the *strings* a run
+        typed, so "password=hunter2" cannot reappear as an innocent value in
+        a step's output.
+        """
+        if not self.ctx.cfg.safety.redact_values:
+            return output
+        values = {v for v in (sensitive_values or set()) if isinstance(v, str) and len(v) >= 3}
+        values |= {v for v in self.typed_values if len(v) >= 3}
+        return _scrub(output, values)
 
     # -- housekeeping -------------------------------------------------
     def _block(self, category: str, reason: str, **details) -> Verdict:

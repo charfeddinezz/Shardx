@@ -98,6 +98,11 @@ class Registry:
     def records(self) -> List[EngineRecord]:
         return list(self._records.values())
 
+    def get_or_none(self, name: str) -> Any:
+        """For tests and optional wiring: an engine that may not be registered."""
+        rec = self._records.get(name)
+        return rec.engine if rec is not None else None
+
     def __contains__(self, name: str) -> bool:
         return name in self._records
 

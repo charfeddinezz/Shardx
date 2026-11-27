@@ -43,6 +43,16 @@ class SafetyConfig:
     max_steps_per_task: int = 500
     # Refuse to act on a page whose URL is not http(s).
     https_only: bool = False
+    # Hosts that need a person before a run touches them at all: banks,
+    # payment processors, government portals. Matched as substrings on the
+    # host, so "bank" catches bank.example and example-bank.com.
+    protected_hosts: List[str] = field(default_factory=lambda: [
+        "bank", "banking", "paypal", "stripe.com", "wise.com", "revolut",
+        "gov", "impots", "tax", "cashplus", "westernunion",
+    ])
+    # When a run fills a field, the value it typed must not reach the journal.
+    # Keys were already redacted; this redacts the values of sensitive fields.
+    redact_values: bool = True
 
 
 @dataclass
@@ -81,6 +91,29 @@ class IntelligenceConfig:
 
 
 @dataclass
+class ReactConfig:
+    """The reasoning loop: look, decide, act, look again."""
+    enabled: bool = True
+    # How many observe-decide-act turns one goal may take before it is stopped.
+    max_turns: int = 12
+    # Steps taken without a page change before the loop decides it is stuck.
+    stale_after: int = 3
+    # Ask the local model again after this many turns even if the page moved.
+    replan_every: int = 4
+    # Stop as soon as the goal looks answered, instead of running the plan dry.
+    stop_when_answered: bool = True
+
+
+@dataclass
+class FleetConfig:
+    """Several profiles, one goal, bounded concurrency."""
+    max_parallel: int = 3
+    # Each profile's browser gets its own motor seed, so identical goals do not
+    # produce identical motion.
+    seed_per_profile: bool = True
+
+
+@dataclass
 class SupervisorConfig:
     interval_s: float = 5.0
     max_restarts: int = 3
@@ -108,6 +141,10 @@ class ShadowConfig:
     vision: VisionConfig = field(default_factory=VisionConfig)
     intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
+    react: ReactConfig = field(default_factory=ReactConfig)
+    fleet: FleetConfig = field(default_factory=FleetConfig)
+    # What to do when a click opens a tab: switch to it, ignore it, or close it.
+    tabs_policy: str = "switch"
 
     # -- paths --------------------------------------------------------
     def state_path(self) -> Path:
@@ -164,7 +201,8 @@ class ShadowConfig:
     def from_dict(cls, data: Dict[str, Any], base: Optional["ShadowConfig"] = None) -> "ShadowConfig":
         cfg = base or cls()
         nested = {"safety": SafetyConfig, "human": HumanConfig, "vision": VisionConfig,
-                  "intelligence": IntelligenceConfig, "supervisor": SupervisorConfig}
+                  "intelligence": IntelligenceConfig, "supervisor": SupervisorConfig,
+                  "react": ReactConfig, "fleet": FleetConfig}
         for key, value in (data or {}).items():
             if key in nested:
                 current = getattr(cfg, key)

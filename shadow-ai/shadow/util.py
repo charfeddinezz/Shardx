@@ -133,6 +133,11 @@ def retryable(exc: BaseException) -> bool:
 # --------------------------------------------------------------------------
 
 _TOKEN_RE = re.compile(r"(?i)\b(bearer\s+[\w\-\.=]+|password|passwd|secret|token|api[_-]?key)\b\s*[:=]?\s*(\S+)")
+# "pass: hunter2", "كلمة المرور: ...", "mot de passe = ..." — the word before the
+# colon is a label, the word after it is never something a log may keep.
+_PHRASE_RE = re.compile(
+    r"(?i)\b(pass(?:word|wd)?|pwd|pin|otp|cvv|cvc|secret|mot\s+de\s+passe|"
+    r"كلمة\s*المرور|رمز\s*السر)\b\s*[:=]\s*(\S+)")
 _CARD_RE = re.compile(r"\b\d{12,19}\b")
 
 
@@ -140,7 +145,8 @@ def redact(text: str) -> str:
     """Strip credentials from anything that goes to a log or a dashboard."""
     if not text:
         return text
-    out = _TOKEN_RE.sub(lambda m: f"{m.group(1)} <redacted>", text)
+    out = _PHRASE_RE.sub(lambda m: f"{m.group(1)}: <redacted>", text)
+    out = _TOKEN_RE.sub(lambda m: f"{m.group(1)} <redacted>", out)
     return _CARD_RE.sub("<redacted-number>", out)
 
 

@@ -47,7 +47,9 @@ class MockEngineSession:
         self.human_speed = human_speed
         self.target_id = f"page-{next(_TARGETS)}"
         self.session_id = f"session-{next(_TARGETS)}"
-        self.doc = MockDocument("about:blank")
+        # One websocket can carry several page targets, as a browser does.
+        self.docs: Dict[str, MockDocument] = {self.target_id: MockDocument("about:blank")}
+        self.active = self.target_id
         self.pointer: Optional[Dict[str, float]] = None
         self.closed = False
         self.commands: Dict[str, int] = {}
@@ -55,6 +57,10 @@ class MockEngineSession:
         self._load("about:blank", page_for("about:blank")["html"])
 
     # -- io -----------------------------------------------------------
+    @property
+    def doc(self) -> MockDocument:
+        return self.docs[self.active]
+
     def send(self, payload: dict) -> None:
         data = json.dumps(payload)
         with self._write_lock:
@@ -101,11 +107,30 @@ class MockEngineSession:
         if method == "Target.setDiscoverTargets":
             return {}
         if method == "Target.getTargets":
-            return {"targetInfos": [self._target_info()]}
+            return {"targetInfos": [self._target_info(target, doc) for target, doc in self.docs.items()]}
         if method == "Target.attachToTarget":
+            target = params.get("targetId", self.active)
+            if target not in self.docs:
+                raise RuntimeError(f"no target {target}")
+            self.active = target
+            self.session_id = f"session-{next(_TARGETS)}"
             return {"sessionId": self.session_id}
         if method == "Target.createTarget":
-            return {"targetId": self.target_id}
+            url = params.get("url", "about:blank")
+            return {"targetId": self._open_target(url)}
+        if method == "Target.closeTarget":
+            target = params.get("targetId", "")
+            if target in self.docs and target != self.target_id:
+                del self.docs[target]
+                if self.active == target:
+                    self.active = self.target_id
+                self.event("Target.targetDestroyed", {"targetId": target}, session=False)
+            return {"success": True}
+        if method == "Page.handleJavaScriptDialog":
+            dialog = self.doc.dialog
+            self.doc.dialog = None
+            self.event("Page.javascriptDialogClosed", {"targetId": self.active, "result": bool(params.get("accept"))})
+            return {"ok": bool(dialog)}
         if method in ("Target.activateTarget", "Target.closeTarget", "Target.detachFromTarget"):
             return {}
         if method in ("Runtime.enable", "Page.enable", "DOM.enable", "Network.enable"):
@@ -136,9 +161,24 @@ class MockEngineSession:
             return {"product": "ShardBrowser/158.0.8127.36 (mock)", "protocolVersion": "1.3"}
         raise KeyError(method)
 
-    def _target_info(self) -> dict:
-        return {"targetId": self.target_id, "type": "page", "title": self.doc.title,
-                "url": self.doc.url, "attached": False}
+    def _target_info(self, target: Optional[str] = None, doc: Optional[MockDocument] = None) -> dict:
+        target = target or self.active
+        doc = doc or self.docs[target]
+        return {"targetId": target, "type": "page", "title": doc.title,
+                "url": doc.url, "attached": False,
+                "openerId": self.target_id if target != self.target_id else ""}
+
+    def _open_target(self, url: str) -> str:
+        """A popup: a new page target, created by the page, as Chrome does."""
+        target = f"page-{next(_TARGETS)}"
+        doc = MockDocument(url)
+        page = page_for(url)
+        doc.load(url, page["html"])
+        self.docs[target] = doc
+        self.event("Target.targetCreated", {"targetInfo": {
+            "targetId": target, "type": "page", "title": doc.title, "url": doc.url,
+            "openerId": self.active, "attached": False}}, session=False)
+        return target
 
     # -- page ---------------------------------------------------------
     def _load(self, url: str, html: str) -> None:
@@ -155,6 +195,10 @@ class MockEngineSession:
 
     def _evaluate(self, params: dict) -> dict:
         expr = (params.get("expression") or "").strip()
+        if self.doc.dialog is not None and "__shadowProbe" in expr or (
+                self.doc.dialog is not None and expr in ("document.readyState",)):
+            # A real page blocks on an open dialog: scripts do not run.
+            raise RuntimeError("Execution context was destroyed: a JavaScript dialog is open")
         self.doc.tick()
         probe_call = PROBE_CALL.search(expr)
         if probe_call:
@@ -323,6 +367,18 @@ class MockEngineSession:
         self.event("Runtime.consoleAPICalled", {"type": "log", "args": [{"value": f"focus={self.doc.focus_id}"}]})
 
     def _activate(self, node) -> None:
+        confirm = node.get("data-confirm")
+        if confirm:
+            self.doc.dialog = {"type": "confirm", "message": confirm}
+            self.event("Page.javascriptDialogOpening",
+                       {"type": "confirm", "message": confirm, "targetId": self.active})
+            return
+        if node.tag == "a" and node.get("target") == "_blank":
+            href = node.get("href", "")
+            if href.startswith("/"):
+                href = "/".join(self.doc.url.split("/")[:3]) + href
+            self._open_target(href)
+            return
         if node.tag in ("input", "textarea", "select"):
             self.doc.focus_id = node.id or self.doc.focus_id
             return

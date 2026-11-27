@@ -106,6 +106,36 @@ PAGES: Dict[str, Dict[str, str]] = {
         </body></html>
         """,
     },
+    "http://dialog.local/": {
+        "title": "Account settings",
+        "html": """
+        <html><head><title>Account settings</title></head><body>
+          <h1>Account settings</h1>
+          <button id="rename" name="rename" data-confirm="Rename this account?">Rename account</button>
+          <button id="save" name="save">Save</button>
+          <p id="status"></p>
+        </body></html>
+        """,
+    },
+    "http://popup.local/": {
+        "title": "Sign in with a provider",
+        "html": """
+        <html><head><title>Sign in with a provider</title></head><body>
+          <h1>Continue with</h1>
+          <a id="oauth" name="oauth" href="http://popup.local/consent" target="_blank">Continue with Example</a>
+          <button id="plain" name="plain">Not now</button>
+        </body></html>
+        """,
+    },
+    "http://popup.local/consent": {
+        "title": "Consent",
+        "html": """
+        <html><head><title>Consent</title></head><body>
+          <h1>Allow access?</h1>
+          <button id="allow" name="allow">Allow</button>
+        </body></html>
+        """,
+    },
     "http://flaky.local/": {
         "title": "Flaky",
         "html": """
