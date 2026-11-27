@@ -345,7 +345,7 @@ with ShadowAI(cfg) as brain:
 ## 9. Tests
 
 ```bash
-python run_tests.py -v      # 196 tests, no browser, no network
+python run_tests.py -v      # 210 tests, no browser, no network
 ```
 
 The suite runs the whole system against the mock engine: the WebSocket framing,
@@ -382,9 +382,10 @@ Said plainly, because the difference matters:
   doctor --live` on your machine.
 * **No CAPTCHA and no 2FA path.** A login that asks for a one-time code stops
   and says so; it does not try to look human at a challenge.
-* **No per-site skill library.** Lessons are remembered per URL, but there is
-  no curated selector pack per site — a heavily customised page may need one
-  editing session.
+* **Lessons are learned, not curated.** A selector that worked on a site is
+  reused for that action the next time and dropped when it goes stale, but
+  there is no hand-written selector pack per site — a heavily customised page
+  may still need one editing session.
 * **`shadow init` does not exist.** Configuration is `shadow.json` (or
   `shadow.json.example`, which lists every key) plus `--token`.
 * **Only saved goals persist, not closures.** A job added with `goal=`
@@ -424,7 +425,7 @@ shadow-ai/
 │   ├── runtime/orchestrator.py the only place that knows the whole cast
 │   ├── mock/                   launcher · CDP engine · DOM · pages
 │   └── dashboard/              one HTML page and a small JSON API
-├── tests/                      196 tests (incl. fake launcher + fake model)
+├── tests/                      210 tests (incl. fake launcher + fake model)
 └── docs/                       architecture · writing an engine
 ```
 

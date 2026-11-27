@@ -146,6 +146,8 @@ class MockDocument:
             limit = int((arg or {}).get("limit") or 200)
             nodes = self.query(selector) if selector else self.nodes
             return [self.describe(node) for node in nodes[:limit]]
+        if name == "url":
+            return self.url
         if name == "text":
             nodes = self.query(str(arg))
             return nodes[0].inner_text() if nodes else None

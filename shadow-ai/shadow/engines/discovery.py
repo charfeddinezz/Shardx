@@ -59,6 +59,8 @@ class DiscoveryEngine(Engine):
         super().__init__(ctx)
         self.last_results: List[Candidate] = []
         self.ambiguous = 0
+        self.matched_lesson = ""     # last time a remembered selector was used
+        self.forgot_lesson = ""      # last time one had gone stale
 
     # -- text helpers -------------------------------------------------
     @staticmethod
@@ -184,6 +186,31 @@ class DiscoveryEngine(Engine):
     # -- picking ------------------------------------------------------
     def pick(self, probe, description: str, selector: str = "", threshold: float = 35.0,
              margin: float = 12.0) -> Candidate:
+        # A selector this site taught us last time outranks any score: it is
+        # evidence from a real run, not a guess from this one. It is dropped the
+        # moment it no longer points at something on the page.
+        if not selector and "memory" in self.ctx.registry:
+            memory = self.ctx.registry.get("memory")
+            remembered = None
+            for lesson in memory.store.data.get("lessons", {}).values():
+                # lessons are small; checking all of them means a goal typed
+                # without the URL still finds the one this site taught us
+                entry = lesson.get("click:" + description) if isinstance(lesson, dict) else None
+                if isinstance(entry, dict) and entry.get("detail"):
+                    remembered = entry["detail"]
+                    break
+                if isinstance(entry, str):
+                    remembered = entry
+                    break
+            if isinstance(remembered, str) and remembered:
+                hits = probe.snapshot(remembered, limit=2)
+                if hits and hits[0].get("visible"):
+                    self.matched_lesson = remembered
+                    return Candidate(node=hits[0], score=100.0,
+                                     why=[f"remembered selector {remembered}"])
+                else:
+                    self.forgot_lesson = remembered
+                    self.emit("lesson_stale", selector=remembered[:60], target=description[:40])
         results = self.search(probe, description, selector=selector)
         usable = [c for c in results if c.score >= threshold and not c.node.get("disabled")]
         if not usable:
@@ -265,4 +292,6 @@ class DiscoveryEngine(Engine):
     def health(self) -> Dict[str, Any]:
         info = super().health()
         info["ambiguous_so_far"] = self.ambiguous
+        info["lesson_hits"] = self.matched_lesson[:80]
+        info["lesson_stale"] = self.forgot_lesson[:80]
         return info
