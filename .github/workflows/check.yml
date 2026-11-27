@@ -18,3 +18,19 @@ jobs:
       # tsc resolves the kit's types from its build output.
       - run: npm run build:ui-kit
       - run: npm run check
+
+  # The SHADOW AI package is Python and has no dependency on the Node toolchain.
+  # Separate job on purpose: it runs in seconds and must not wait for npm ci.
+  shadow-ai:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the package
+        run: python -m pip install --no-deps -e ./shadow-ai
+      - name: Compile every module
+        run: python -m compileall -q shadow-ai/shadow shadow-ai/tests
+      - name: Test
+        run: python shadow-ai/run_tests.py

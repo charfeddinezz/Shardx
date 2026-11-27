@@ -276,6 +276,14 @@ iframes, web workers, developer tools and headless mode.
   projects are reachable the same way — list them, read one, replace it,
   run it, watch a run, stop it, export and import — over the local API and
   as MCP tools, so a project no longer has to be started by hand.
+* **SHADOW AI autopilot (`shadow-ai/`):** a local operator that takes a goal in
+  Arabic, English or French and drives a profile through the same human input
+  engine — planning steps, finding the right element and refusing a tie,
+  reading the page, remembering what worked, recovering when it does not, and
+  watching its own engines so an unattended run resumes where it stopped.
+  Everything runs on this computer; there is no cloud model and no account, and
+  a local Ollama server is optional. OS-level input and shell commands are off
+  by default. Setup: **[shadow-ai/README.md](shadow-ai/README.md)**.
 * **Cookie I/O:** import / export the profile's Chromium Cookies
   SQLite with v10 (mac / linux) and AES-GCM + DPAPI (win) decryption.
 * **Extension library:** paste a Web Store link or extension ID and the
@@ -809,7 +817,31 @@ Minimal stdio registration:
 }
 ```
 
-### 4. Standalone SDKs (Python / Node / Rust)
+### 4. SHADOW AI autopilot (`shadow-ai/`)
+
+A separate, dependency-free Python package in this repository that operates a
+profile instead of calling it step by step. It speaks the local API above and
+drives the profile's CDP endpoint, using the engine's `Motion` domain for
+pointer and keyboard input.
+
+```bash
+cd shadow-ai
+./install.sh                      # Windows: install.bat
+./run.sh run "Go to shop.local, fill the search field with lamp, press Search"
+./run.sh                          # local dashboard on 127.0.0.1:40330
+shadow --mock demo                # the whole system, no browser needed
+```
+
+It is arranged as independent engines — intelligence, discovery, page
+understanding, keyboard, mouse, vision, memory, data, recovery, workflow,
+scheduler, safety, decision, and an **autonomous supervisor** that heartbeats
+each engine, restarts one that died, quarantines one that keeps dying, and
+resumes an interrupted task from its last journaled step. Steps are resolved
+against the page as it is; a purchase pauses for a person instead of guessing.
+See **[shadow-ai/README.md](shadow-ai/README.md)** for the engines, the safety
+defaults, and the honest list of limits.
+
+### 5. Standalone SDKs (Python / Node / Rust)
 
 These client libraries do not require the desktop app. On first use,
 they download the same engine and fingerprint library, then launch
@@ -828,7 +860,7 @@ server-side worker without installing the GUI.
 * **Node:** [sdks/node/README.md](sdks/node/README.md), `npm install @proxyshard/shardx`
 * **Rust:** [sdks/rust/README.md](sdks/rust/README.md), `cargo add shardx`
 
-### 5. Team spaces and sync (self-hosted)
+### 6. Team spaces and sync (self-hosted)
 
 **Team spaces** let several people work with the same profiles through a
 server you run yourself. **Personal sync** carries your own profiles to

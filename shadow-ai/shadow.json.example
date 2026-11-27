@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "Copy to shadow.json next to this package (or point SHADOW_CONFIG at it).",
+    "Every value here is the built-in default except default_profile and the model.",
+    "Secrets never live in this file: use SHADOW_API_TOKEN, or SHADOW_LAUNCHER_SETTINGS"
+  ],
+
+  "api_base": "http://127.0.0.1:40325",
+  "default_profile": "",
+  "launcher_settings": "",
+  "mock": false,
+  "headless": false,
+  "log_level": "INFO",
+
+  "safety": {
+    "allow_os_input": false,
+    "allow_system_commands": false,
+    "allowed_commands": ["echo", "date", "hostname"],
+    "redact_sensitive_inputs": true,
+    "max_task_seconds": 900,
+    "max_steps_per_task": 500,
+    "https_only": false,
+    "confirm_actions": ["purchase", "payment", "transfer", "delete_account",
+                        "send_message", "post_public", "change_password",
+                        "download_file", "upload_file"],
+    "blocked_hosts": ["localhost", "127.0.0.1", "0.0.0.0", "::1",
+                      "169.254.169.254", "metadata.google.internal"]
+  },
+
+  "human": {
+    "pace": 1.0,
+    "typo_rate": 0.0,
+    "read_delay_ms": 180,
+    "think_pause_ms": 400,
+    "pointer_seed": null
+  },
+
+  "vision": {
+    "ocr": "auto",
+    "tesseract_lang": "eng",
+    "diff_threshold": 0.02,
+    "prefer_dom": true
+  },
+
+  "intelligence": {
+    "provider": "heuristic",
+    "base_url": "http://127.0.0.1:11434",
+    "model": "llama3.1",
+    "timeout_s": 60,
+    "max_tokens": 700,
+    "temperature": 0.2
+  },
+
+  "supervisor": {
+    "interval_s": 5.0,
+    "max_restarts": 3,
+    "restart_window_s": 300,
+    "heartbeat_timeout_s": 45,
+    "resume_tasks": true,
+    "quarantine_after": 5
+  }
+}
