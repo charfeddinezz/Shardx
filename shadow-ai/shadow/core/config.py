@@ -82,6 +82,7 @@ class IntelligenceConfig:
     timeout_s: float = 60.0
     max_tokens: int = 700
     temperature: float = 0.2
+    retries: int = 2               # one bad JSON answer is not a failed goal
     # The planner refuses to let the model choose anything outside this set.
     allow_actions: List[str] = field(default_factory=lambda: [
         "goto", "click", "type", "press", "scroll", "wait", "extract", "assert",

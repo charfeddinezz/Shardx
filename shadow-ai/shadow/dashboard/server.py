@@ -98,6 +98,8 @@ class Dashboard:
                     task = (parse_qs(path.query).get("task") or [""])[0]
                     entries = dashboard.brain.journal.entries(task_id=task)
                     return self._json([e.to_dict() for e in entries[-200:]])
+                if path.path == "/api/fleet":
+                    return self._json(dashboard.fleet_report())
                 if path.path == "/api/health":
                     return self._json({"ok": True, "uptime_s": round(time.time() - dashboard.started, 1)})
                 return self._json({"error": "not found"}, 404)
@@ -119,6 +121,15 @@ class Dashboard:
                         return self._json({"error": "a task is already running", **dashboard.last()}, 409)
                     dashboard.run_async(goal, approved=bool(body.get("approved")))
                     return self._json({"started": goal})
+                if path.path == "/api/fleet":
+                    goal = (body.get("goal") or "").strip()
+                    if not goal:
+                        return self._json({"error": "a goal is required"}, 400)
+                    profiles = body.get("profiles") or None
+                    if isinstance(profiles, str):
+                        profiles = [p.strip() for p in profiles.split(",") if p.strip()]
+                    dashboard.fan_out(goal, profiles, approved=bool(body.get("approved")))
+                    return self._json({"started": goal, "profiles": profiles or "all"})
                 if path.path == "/api/approve":
                     task_id = (body.get("task_id") or "").strip()
                     if not task_id:
@@ -168,6 +179,19 @@ class Dashboard:
         self._worker = threading.Thread(target=work, name="shadow-dashboard-run", daemon=True)
         self._worker.start()
 
+    def fan_out(self, goal: str, profiles=None, approved: bool = False) -> None:
+        """The fleet runs its own workers, so it does not take the run slot."""
+        def work() -> None:
+            try:
+                self.brain.fan_out(goal, profiles, approved=approved)
+            except Exception as exc:  # noqa: BLE001
+                self.brain.ui.notify("err", f"fleet: {type(exc).__name__}: {exc}")
+        threading.Thread(target=work, name="shadow-dashboard-fleet", daemon=True).start()
+
+    def fleet_report(self) -> Dict[str, Any]:
+        engine = self.brain.engine("fleet")
+        return engine.report()
+
     def state(self) -> Dict[str, Any]:
         status = self.brain.status()
         ui = self.brain.engine("ui").state()
@@ -177,6 +201,7 @@ class Dashboard:
             "lines": ui["lines"][-60:],
             "running": self.busy(),
             "last": self.last(),
+            "fleet": self.fleet_report(),
         }
 
 
@@ -228,6 +253,12 @@ PAGE = r"""<!doctype html>
     <ul class="steps" id="steps"></ul>
   </section>
   <section>
+    <h2>Fleet</h2>
+    <form id="ff"><input id="fleetGoal" type="text" placeholder="the same goal on every profile" autocomplete="off">
+      <button id="fan">Fan out</button></form>
+    <table id="fleetTbl"></table>
+  </section>
+  <section>
     <h2>Engines</h2>
     <table id="enginesTbl"></table>
   </section>
@@ -270,6 +301,12 @@ async function refresh() {
       ["resumed", (sup.resumed_tasks || []).length],
       ["incidents", sup.incidents.length],
     ].map(([k,v]) => `<tr><td class="k">${esc(k)}</td><td>${esc(v)}</td></tr>`).join("");
+    const fleet = (s.fleet && s.fleet.jobs) || [];
+    $("fleetTbl").innerHTML = fleet.length ? fleet.slice(-8).reverse().map(j =>
+      `<tr><td class="${j.status === "done" ? "ok" : (j.status === "failed" ? "err" : "warn")}">${esc(j.status)}</td>
+        <td>${esc(j.profile)}</td><td class="dim">${esc((j.answer || j.error || j.goal || "").slice(0, 70))}</td>
+        <td class="dim">${esc(j.ms)}ms</td></tr>`).join("")
+      : `<tr><td class="dim" colspan="4">no fleet jobs yet</td></tr>`;
     $("log").textContent = (s.lines || []).join("\n") || "…";
     $("log").scrollTop = 1e9;
 
@@ -304,6 +341,16 @@ function showResult(r) {
     $("steps").appendChild(b);
   }
 }
+
+$("ff").onsubmit = async (e) => {
+  e.preventDefault();
+  const goal = $("fleetGoal").value.trim();
+  if (!goal) return;
+  const r = await fetch("api/fleet", {method:"POST", headers: authHeaders,
+                                      body: JSON.stringify({goal})});
+  if (!r.ok) { const err = await r.json(); $("result").innerHTML = `<span class="err">${esc(err.error)}</span>`; }
+  refresh();
+};
 
 $("f").onsubmit = async (e) => {
   e.preventDefault();

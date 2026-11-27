@@ -393,13 +393,14 @@ class LocalReasoner:
         "You are the planner inside SHADOW AI, an operator that drives a browser through the "
         "Chrome DevTools Protocol. Reply with ONE JSON object and nothing else: "
         '{"thought": string, "action": string, "target": string, "value": string}. '
-        "action must be one of: {actions}. target is a CSS selector, a visible label, or a URL. "
+        "action must be one of: ACTIONS. target is a CSS selector, a visible label, or a URL. "
         "Never propose running shell commands, reading credentials, or paying for anything. "
         'If the goal is done, use action "finish".'
     )
 
     def __init__(self, cfg: IntelligenceConfig):
         self.cfg = cfg
+        self.last_raw = ""
 
     @property
     def available(self) -> bool:
@@ -409,26 +410,43 @@ class LocalReasoner:
         if not self.available:
             return None
         prompt = self._prompt(goal, page, history)
-        try:
-            raw = self._call(prompt)
-        except Exception:
-            return None
-        return self._parse(raw)
+        raw = ""
+        for attempt in range(max(1, int(self.cfg.retries))):
+            try:
+                raw = self._call(prompt if attempt == 0 else self._retry_prompt(prompt))
+            except Exception:
+                continue
+            decision = self._parse(raw)
+            if decision is not None:
+                return decision
+        self.last_raw = raw[:400]
+        return None
+
+    @staticmethod
+    def _retry_prompt(prompt: str) -> str:
+        return prompt + ("\n\nYour previous answer was not valid JSON. Reply with the object only, "
+                         'for example {"thought": "...", "action": "click", "target": "#buy", "value": ""}')
 
     # -- transport ----------------------------------------------------
     def _call(self, prompt: str) -> str:
         if self.cfg.provider == "ollama":
             url = self.cfg.base_url.rstrip("/") + "/api/generate"
             body = {"model": self.cfg.model, "prompt": prompt, "stream": False,
+                    "format": "json",     # Ollama's own constrained decoding
                     "options": {"temperature": self.cfg.temperature,
-                                "num_predict": self.cfg.max_tokens}}
+                                "num_predict": self.cfg.max_tokens,
+                                "stop": ["\n\n"]}}
             data = self._post(url, body)
             return str(data.get("response", ""))
         if self.cfg.provider == "openai_compatible":
             url = self.cfg.base_url.rstrip("/") + "/v1/chat/completions"
             body = {"model": self.cfg.model, "temperature": self.cfg.temperature,
                     "max_tokens": self.cfg.max_tokens,
-                    "messages": [{"role": "system", "content": self.SYSTEM.format(actions=", ".join(self.cfg.allow_actions))},
+                    # Both keys are sent because servers differ on which one
+                    # they honour; a server that knows neither ignores it.
+                    "response_format": {"type": "json_object"},
+                    "grammar": self._grammar(),
+                    "messages": [{"role": "system", "content": self._system()},
                                  {"role": "user", "content": prompt}]}
             data = self._post(url, body)
             choices = data.get("choices") or []
@@ -443,9 +461,17 @@ class LocalReasoner:
         with urllib.request.urlopen(req, timeout=self.cfg.timeout_s) as res:
             return json.loads(res.read().decode("utf-8", "replace"))
 
+    def _system(self) -> str:
+        """The system prompt, with the allow-list spliced in.
+
+        Deliberately not `str.format`: the prompt is mostly JSON, and braces in
+        a format string are placeholders — this exact bug made every model call
+        raise KeyError and quietly fall back to the heuristics.
+        """
+        return self.SYSTEM.replace("ACTIONS", ", ".join(self.cfg.allow_actions))
+
     def _prompt(self, goal: str, page: Dict[str, Any], history: List[Dict[str, Any]]) -> str:
-        actions = ", ".join(self.cfg.allow_actions)
-        system = self.SYSTEM.format(actions=actions)
+        system = self._system()
         elements = "\n".join(
             f"- {e.get('role') or e.get('tag')} \"{(e.get('name') or e.get('text') or '')[:50]}\" "
             f"selector={e.get('selector')}" for e in (page.get("elements") or [])[:40])
@@ -455,20 +481,121 @@ class LocalReasoner:
                 f"PAGE TEXT (trimmed): {(page.get('text') or '')[:1500]}\n\nINTERACTIVE ELEMENTS:\n{elements}\n\n"
                 f"STEPS SO FAR:\n{done}\n\nNext single step as JSON:")
 
+    def _grammar(self) -> Dict[str, Any]:
+        """A GBNF-ish schema a llama.cpp server can enforce token by token."""
+        return {
+            "type": "object",
+            "properties": {
+                "thought": {"type": "string"},
+                "action": {"type": "string", "enum": list(self.cfg.allow_actions)},
+                "target": {"type": "string"},
+                "value": {"type": "string"},
+            },
+            "required": ["action"],
+        }
+
     def _parse(self, raw: str) -> Optional[Dict[str, str]]:
-        match = re.search(r"\{.*\}", raw or "", re.S)
-        if not match:
+        """Whatever the model said, get one usable decision out of it.
+
+        Small local models break JSON in the same four ways every time, so the
+        repair is a fixed ladder rather than a hope: fenced blocks, a bare
+        object, a single quoted pair, or the verb itself.
+        """
+        text = (raw or "").strip()
+        if not text:
             return None
+        candidate = None
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+        if fenced:
+            candidate = fenced.group(1)
+        if candidate is None:
+            balanced = self._balanced_object(text)
+            candidate = balanced or text
+        data: Optional[Dict[str, Any]] = None
         try:
-            data = json.loads(match.group(0))
+            data = json.loads(candidate)
         except ValueError:
+            data = self._loose_json(candidate)
+        if data is None:
+            data = self._from_prose(text)
+        if not isinstance(data, dict):
             return None
-        action = str(data.get("action", "")).strip()
+        action = str(data.get("action") or data.get("verb") or "").strip().lower()
+        aliases = {"open": "goto", "navigate": "goto", "visit": "goto", "type": "type",
+                   "fill": "type", "enter": "type", "tap": "click", "press": "press",
+                   "read": "extract", "get": "extract", "done": "finish", "stop": "finish",
+                   "choose": "select", "back": "back"}
+        action = aliases.get(action, action)
         if action not in self.cfg.allow_actions:
             return None
-        return {"action": action, "target": str(data.get("target", ""))[:200],
-                "value": str(data.get("value", ""))[:400],
-                "thought": str(data.get("thought", ""))[:300]}
+        target = str(data.get("target") or data.get("selector") or data.get("element") or "")
+        value = str(data.get("value") or data.get("text") or "")
+        thought = str(data.get("thought") or data.get("reason") or "")
+        return {"action": action, "target": target[:200].strip(),
+                "value": value[:400], "thought": thought[:300].strip()}
+
+    @staticmethod
+    def _balanced_object(text: str) -> Optional[str]:
+        """The first complete {...} in the text, brackets counted properly, so a
+        pretty-printed answer with braces inside strings still parses."""
+        start = text.find("{")
+        if start < 0:
+            return None
+        depth, in_string, escape = 0, False, False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return None
+
+    @staticmethod
+    def _loose_json(text: str) -> Optional[Dict[str, Any]]:
+        """Single quotes, trailing commas, unquoted keys: the usual damage."""
+        fixed = re.sub(r"(?<=[:\[,])\s*'([^']*)'", lambda m: ' "' + m.group(1) + '"', text)
+        fixed = re.sub(r"'([^']*)'\s*:", lambda m: '"' + m.group(1) + '":', fixed)
+        fixed = re.sub(r",\s*([}\]])", r"\1", fixed)
+        fixed = re.sub(r"([{,]\s*)([A-Za-z_][\w]*)\s*:", r'\1"\2":', fixed)
+        try:
+            data = json.loads(fixed)
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    HEDGE = re.compile(r"(?i)\b(not sure|unsure|unclear|don't know|do not know|maybe|"
+                       r"perhaps|cannot|can't|unable|sorry|لا أعرف|ربما|peut-être|pas sûr)")
+
+    def _from_prose(self, text: str) -> Optional[Dict[str, Any]]:
+        """Last resort: read a decision out of a sentence.
+
+        A hedged answer ("maybe click something?") is not a decision: refusing
+        it makes the caller retry instead of acting on a coin flip.
+        """
+        if self.HEDGE.search(text):
+            return None
+        lowered = text.lower()
+        for verb, canonical in (("click", "click"), ("type", "type"), ("fill", "type"),
+                                ("open", "goto"), ("go to", "goto"), ("navigate", "goto"),
+                                ("press", "press"), ("scroll", "scroll"), ("finish", "finish"),
+                                ("done", "finish"), ("extract", "extract"), ("read", "extract")):
+            if verb in lowered:
+                quoted = QUOTED.search(text)
+                return {"action": canonical, "target": quoted.group(1) if quoted else "",
+                        "value": "", "thought": text[:200]}
+        return None
 
 
 # --------------------------------------------------------------------------

@@ -66,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=40330)
     serve.add_argument("--open", action="store_true")
 
+    fleet = sub.add_parser("fleet", help="one goal, several profiles, at the same time")
+    fleet.add_argument("goal", nargs="+")
+    fleet.add_argument("--profiles", default="", help="comma-separated profile ids (default: up to fleet.max_parallel)")
+    fleet.add_argument("--all-profiles", action="store_true", help="use every profile the launcher knows")
+    fleet.add_argument("--yes", action="store_true", help="approve irreversible actions up front")
+    fleet.add_argument("--background", action="store_true", help="start and return immediately")
+
     approve = sub.add_parser("approve", help="release a task that is waiting for a human")
     approve.add_argument("task_id")
 
@@ -139,6 +146,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _print(store.data if args.json else _memory_text(store))
         if args.verb == "demo":
             return _demo(brain, args)
+        if args.verb == "fleet":
+            return _fleet(brain, " ".join(args.goal), args)
         if args.verb == "approve":
             brain.boot()
             result = brain.approve(args.task_id)
@@ -163,6 +172,25 @@ def _run(brain: ShadowAI, goal: str, args) -> int:
         brain.ui.notify("warn", f"to continue: shadow approve {result.task_id}")
         return 3
     return 0 if result.ok else 1
+
+
+def _fleet(brain: ShadowAI, goal: str, args) -> int:
+    brain.boot()
+    names = [p.strip() for p in (args.profiles or "").split(",") if p.strip()]
+    if args.all_profiles or not names:
+        names = []          # let the runtime pick fleet.max_parallel profiles
+    jobs = brain.fan_out(goal, names or None, approved=getattr(args, "yes", False),
+                         background=getattr(args, "background", False))
+    if args.json:
+        print(jdump(jobs, indent=2))
+    else:
+        for job in jobs:
+            print(f"  {job['profile']:<16} {job['status']:<12} "
+                  f"{(job.get('answer') or job.get('error') or '')!s:.90}")
+    codes = {"done": 0, "needs_approval": 3}
+    if any(j["status"] == "needs_approval" for j in jobs):
+        return 3
+    return 0 if all(j["status"] in ("done", "running", "pending") for j in jobs) else 1
 
 
 def _plan(cfg: ShadowConfig, goal: str, args) -> int:

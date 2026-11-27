@@ -12,7 +12,9 @@ the whole cast; this file is the only place that does.
 
 from __future__ import annotations
 
+import copy
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..core.config import ShadowConfig
@@ -34,6 +36,7 @@ from ..engines.pages import PagesEngine
 from ..engines.react import ReasoningEngine
 from ..engines.recovery import RecoveryEngine
 from ..engines.safety import SafetyEngine
+from ..engines.fleet import FleetEngine
 from ..engines.scheduler import SchedulerEngine
 from ..engines.supervisor import AutonomousSupervisor
 from ..engines.ui import UiEngine
@@ -51,6 +54,7 @@ class ShadowAI:
         self.ctx = ShadowContext(self.cfg)
         self.ui = UiEngine(self.ctx, printer=printer)
         self.mock_launcher = mock_launcher
+        self._workers: List[Any] = []
         self._built = False
         self._build()
 
@@ -81,6 +85,7 @@ class ShadowAI:
                                                                 "keyboard", "mouse", "discovery",
                                                                 "page", "data", "recovery", "actions",
                                                                 "react")),
+            ("fleet", FleetEngine(self.ctx, factory=self._fleet_worker), ()),
             ("scheduler", SchedulerEngine(self.ctx), ()),
             ("supervisor", AutonomousSupervisor(self.ctx, on_resume=self._on_resume), ("workflow", "browser")),
         ]
@@ -89,6 +94,52 @@ class ShadowAI:
         # Every journal write passes the safety engine before it reaches disk.
         self.ctx.journal.scrub = lambda data: self.ctx.registry.get("safety").scrub_output(data)
         self._built = True
+
+    # -- fleet ---------------------------------------------------------
+    def _fleet_worker(self, profile: str) -> "ShadowAI":
+        """A whole SHADOW AI per profile: own engines, journal, browser."""
+        cfg = copy.deepcopy(self.cfg)
+        cfg.default_profile = profile
+        cfg.state_dir = str(Path(self.cfg.state_dir) / "fleet" / _safe(profile))
+        # Each worker seeds its own motor RNG, so two identical goals on two
+        # profiles do not produce two identical pointers.
+        if cfg.fleet.seed_per_profile:
+            cfg.human.pointer_seed = (cfg.human.pointer_seed or 0) + abs(hash(profile)) % 997
+        # A worker does not draw: its banner would interleave with the fleet's.
+        worker = ShadowAI(cfg, printer=lambda level, text: None)
+        worker.mock_launcher = self.mock_launcher
+        worker.ctx._mock = self.ctx._mock
+        worker.boot()
+        self._workers.append(worker)
+        return worker
+
+    def fan_out(self, goal: str, profiles: Optional[List[str]] = None,
+                approved: bool = False, background: bool = False) -> List[Dict[str, Any]]:
+        """Run one goal on several profiles at once."""
+        self.ctx.reset_cancel()
+        from ..engines.fleet import FleetJob
+        names = (profiles or self.profiles())[:max(1, self.cfg.fleet.max_parallel)]
+        jobs = [FleetJob(goal=goal, profile=name, approved=approved) for name in names]
+        return self.engine("fleet").run_jobs(jobs, background=background)
+
+    def fleet_plan(self, jobs: List[Dict[str, str]], approved: bool = False) -> List[Dict[str, Any]]:
+        """Different goals on different profiles, in one call."""
+        self.ctx.reset_cancel()
+        from ..engines.fleet import FleetJob
+        return self.engine("fleet").run_jobs(
+            [FleetJob(goal=j["goal"], profile=j["profile"], approved=approved) for j in jobs])
+
+    def profiles(self) -> List[str]:
+        """The profiles the launcher knows about; the mock has three."""
+        if self.cfg.mock:
+            launcher = self.ctx._mock
+            if launcher is not None:
+                return list(launcher.profiles)
+            return ["win-rtx4060", "mac-studio", "linux-box"]
+        try:
+            return [p.get("id", "") for p in self.ctx.api.profiles() if p.get("id")]
+        except Exception:  # noqa: BLE001 - offline is not an error here
+            return []
 
     # -- lifecycle ----------------------------------------------------
     def boot(self, engine_names: Optional[List[str]] = None) -> Dict[str, str]:
@@ -102,6 +153,12 @@ class ShadowAI:
         return report
 
     def shutdown(self) -> None:
+        for worker in self._workers:
+            try:
+                worker.shutdown()
+            except Exception:  # noqa: BLE001 - shutdown is best effort
+                pass
+        self._workers.clear()
         self.ctx.cancel()
         self.ctx.registry.stop_all()
         self.ctx.close()
@@ -215,3 +272,9 @@ def _configure_logging(level: str) -> None:
 def _version() -> str:
     from .. import __version__
     return __version__
+
+
+def _safe(profile: str) -> str:
+    """A profile id used as a directory name."""
+    keep = "".join(ch for ch in (profile or "profile") if ch.isalnum() or ch in "-_.")
+    return keep or "profile"
